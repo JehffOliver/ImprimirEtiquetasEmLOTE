@@ -11,14 +11,14 @@ import os
 import webbrowser
 
 # ============================================
-# ARQUIVOS DE CONFIGURAÇÃO PADRÃO
+# CONFIGURAÇÕES PADRÃO
 # ============================================
 PADRAO_TAMANHO = {
     "etiqueta_largura": 104.5,
     "etiqueta_altura": 34.0,
     "margem_esquerda": 6.0,
-    "margem_superior": 12.0,
-    "espacamento_colunas": 3.0,
+    "margem_superior": 15.0,
+    "espacamento_colunas": 4.0,
     "qr_code_x": 80.0,
     "qr_code_y": 6.0,
     "qr_code_tamanho": 22.0
@@ -32,25 +32,15 @@ PADRAO_MARGENS = {
 }
 
 PADRAO_POS = {
-    "codigo_x": 5.0,
-    "codigo_y": 8.0,
-    "codigo_fonte": 10.0,
-    "descricao_x": 5.0,
-    "descricao_y": 14.0,
-    "descricao_fonte": 9.0,
-    "lote_x": 5.0,
-    "lote_y": 21.0,
-    "lote_fonte": 9.0,
-    "pacote_x": 5.0,
-    "pacote_y": 27.0,
-    "pacote_fonte": 9.0,
-    "volume_x": 5.0,
-    "volume_y": 33.0,
-    "volume_fonte": 9.0
+    "codigo_x": 5.0, "codigo_y": 8.0, "codigo_fonte": 10.0,
+    "descricao_x": 5.0, "descricao_y": 14.0, "descricao_fonte": 9.0,
+    "lote_x": 5.0, "lote_y": 21.0, "lote_fonte": 9.0,
+    "pacote_x": 5.0, "pacote_y": 27.0, "pacote_fonte": 9.0,
+    "volume_x": 5.0, "volume_y": 33.0, "volume_fonte": 9.0
 }
 
 # ============================================
-# FUNÇÕES DE CONFIGURAÇÃO E SALVAMENTO
+# CARREGAR / CRIAR JSONS
 # ============================================
 def garantir_json(nome, padrao):
     if not os.path.exists(nome):
@@ -71,17 +61,34 @@ def salvar_configuracao(arquivo, dados):
         json.dump(dados, f, indent=4, ensure_ascii=False)
     messagebox.showinfo("Sucesso", f"Configuração salva em {arquivo}")
 
+# ============================================
+# EDITOR DE CONFIGURAÇÕES
+# ============================================
 def abrir_editor_config(titulo, config_dict, arquivo):
     janela = tk.Toplevel(root)
     janela.title(titulo)
-    janela.geometry("450x450")
-    entradas = {}
+    janela.geometry("600x600")
 
-    ttk.Label(janela, text="Editar configurações:").grid(row=0, column=0, columnspan=2, pady=10)
+    # Adiciona rolagem para janelas longas
+    canvas_frame = tk.Canvas(janela)
+    scrollbar = ttk.Scrollbar(janela, orient="vertical", command=canvas_frame.yview)
+    scrollable_frame = ttk.Frame(canvas_frame)
+
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas_frame.configure(scrollregion=canvas_frame.bbox("all"))
+    )
+    canvas_frame.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas_frame.configure(yscrollcommand=scrollbar.set)
+    canvas_frame.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    ttk.Label(scrollable_frame, text="Editar configurações:").grid(row=0, column=0, columnspan=2, pady=10)
+    entradas = {}
     row = 1
     for chave, valor in config_dict.items():
-        ttk.Label(janela, text=chave.replace("_", " ").capitalize()).grid(row=row, column=0, sticky="w", padx=10, pady=5)
-        entrada = ttk.Entry(janela, width=15)
+        ttk.Label(scrollable_frame, text=chave.replace("_", " ").capitalize()).grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        entrada = ttk.Entry(scrollable_frame, width=15)
         entrada.insert(0, str(valor))
         entrada.grid(row=row, column=1, padx=10, pady=5)
         entradas[chave] = entrada
@@ -96,22 +103,22 @@ def abrir_editor_config(titulo, config_dict, arquivo):
         salvar_configuracao(arquivo, config_dict)
         janela.destroy()
 
-    ttk.Button(janela, text="Salvar", command=salvar).grid(row=row, column=0, pady=15)
-    ttk.Button(janela, text="Cancelar", command=janela.destroy).grid(row=row, column=1, pady=15)
+    ttk.Button(scrollable_frame, text="Salvar", command=salvar).grid(row=row, column=0, pady=15)
+    ttk.Button(scrollable_frame, text="Cancelar", command=janela.destroy).grid(row=row, column=1, pady=15)
 
 # ============================================
-# FUNÇÃO PRINCIPAL DE GERAÇÃO DO PDF
+# GERAR PDF ALINHADO
 # ============================================
 def gerar_pdf(dados):
     try:
         nome_arquivo = "etiquetas.pdf"
         c = canvas.Canvas(nome_arquivo, pagesize=A4)
 
-        LARGURA = CONFIG_TAMANHO.get("etiqueta_largura", 104.5) * mm
-        ALTURA = CONFIG_TAMANHO.get("etiqueta_altura", 34.0) * mm
-        MARGEM_ESQ = CONFIG_TAMANHO.get("margem_esquerda", 6.0) * mm
-        MARGEM_SUP = CONFIG_TAMANHO.get("margem_superior", 12.0) * mm
-        ESPACO_H = CONFIG_TAMANHO.get("espacamento_colunas", 3.0) * mm
+        LARGURA = CONFIG_TAMANHO["etiqueta_largura"] * mm
+        ALTURA = CONFIG_TAMANHO["etiqueta_altura"] * mm
+        MARGEM_ESQ = CONFIG_TAMANHO["margem_esquerda"] * mm
+        MARGEM_SUP = CONFIG_TAMANHO["margem_superior"] * mm
+        ESPACO_H = CONFIG_TAMANHO["espacamento_colunas"] * mm
 
         etiquetas_geradas = int(dados["quantidade"])
         linha, coluna = 0, 0
@@ -120,7 +127,6 @@ def gerar_pdf(dados):
             x = MARGEM_ESQ + coluna * (LARGURA + ESPACO_H)
             y = A4[1] - MARGEM_SUP - (linha + 1) * ALTURA
 
-            # Dados
             codigo = dados["codigo_produto"]
             descricao = dados["descricao"]
             lote = f"OS{dados['lote']}"
@@ -129,7 +135,6 @@ def gerar_pdf(dados):
 
             primeira_linha = f"{codigo} / {descricao}"
 
-            # QR CODE
             qr_texto = f"|{codigo}|{lote}|{dados['pacote']}|{descricao}"
             qr = qrcode.make(qr_texto)
             buf = BytesIO()
@@ -137,33 +142,31 @@ def gerar_pdf(dados):
             buf.seek(0)
             img = ImageReader(buf)
 
-            # Texto alinhado
-            c.setFont("Helvetica-Bold", CONFIG_POS.get("codigo_fonte", 10))
-            c.drawString(x + CONFIG_POS.get("codigo_x", 5) * mm,
-                         y + ALTURA - CONFIG_POS.get("codigo_y", 8) * mm,
+            c.setFont("Helvetica-Bold", CONFIG_POS["codigo_fonte"])
+            c.drawString(x + CONFIG_POS["codigo_x"] * mm,
+                         y + ALTURA - CONFIG_POS["codigo_y"] * mm,
                          primeira_linha)
 
-            c.setFont("Helvetica", CONFIG_POS.get("lote_fonte", 9))
-            c.drawString(x + CONFIG_POS.get("lote_x", 5) * mm,
-                         y + ALTURA - CONFIG_POS.get("lote_y", 21) * mm,
+            c.setFont("Helvetica", CONFIG_POS["lote_fonte"])
+            c.drawString(x + CONFIG_POS["lote_x"] * mm,
+                         y + ALTURA - CONFIG_POS["lote_y"] * mm,
                          f"Número do Lote: {lote}")
 
-            c.setFont("Helvetica", CONFIG_POS.get("pacote_fonte", 9))
-            c.drawString(x + CONFIG_POS.get("pacote_x", 5) * mm,
-                         y + ALTURA - CONFIG_POS.get("pacote_y", 27) * mm,
+            c.setFont("Helvetica", CONFIG_POS["pacote_fonte"])
+            c.drawString(x + CONFIG_POS["pacote_x"] * mm,
+                         y + ALTURA - CONFIG_POS["pacote_y"] * mm,
                          pacote)
 
-            c.setFont("Helvetica", CONFIG_POS.get("volume_fonte", 9))
-            c.drawString(x + CONFIG_POS.get("volume_x", 5) * mm,
-                         y + ALTURA - CONFIG_POS.get("volume_y", 33) * mm,
+            c.setFont("Helvetica", CONFIG_POS["volume_fonte"])
+            c.drawString(x + CONFIG_POS["volume_x"] * mm,
+                         y + ALTURA - CONFIG_POS["volume_y"] * mm,
                          volume)
 
-            # QR code posicionado à direita
             c.drawImage(img,
-                        x + CONFIG_TAMANHO.get("qr_code_x", 80) * mm,
-                        y + CONFIG_TAMANHO.get("qr_code_y", 6) * mm,
-                        CONFIG_TAMANHO.get("qr_code_tamanho", 22) * mm,
-                        CONFIG_TAMANHO.get("qr_code_tamanho", 22) * mm)
+                        x + CONFIG_TAMANHO["qr_code_x"] * mm,
+                        y + CONFIG_TAMANHO["qr_code_y"] * mm,
+                        CONFIG_TAMANHO["qr_code_tamanho"] * mm,
+                        CONFIG_TAMANHO["qr_code_tamanho"] * mm)
 
             coluna += 1
             if coluna >= 2:
@@ -175,12 +178,12 @@ def gerar_pdf(dados):
 
         c.save()
         webbrowser.open_new_tab(nome_arquivo)
-        messagebox.showinfo("Sucesso", f"{etiquetas_geradas} etiqueta(s) gerada(s) e aberta(s) com sucesso!")
+        messagebox.showinfo("Sucesso", "Etiquetas geradas e abertas automaticamente!")
     except Exception as e:
-        messagebox.showerror("Erro", f"Falha ao gerar etiquetas:\n{e}")
+        messagebox.showerror("Erro", str(e))
 
 # ============================================
-# FUNÇÕES AUXILIARES
+# INTERFACE PRINCIPAL
 # ============================================
 def gerar_etiqueta():
     dados = {
@@ -192,20 +195,17 @@ def gerar_etiqueta():
         "quantidade": entry_pos.get()
     }
     if not all(dados.values()):
-        messagebox.showwarning("Campos obrigatórios", "Preencha todos os campos antes de gerar.")
+        messagebox.showwarning("Campos obrigatórios", "Preencha todos os campos.")
         return
     gerar_pdf(dados)
 
 def limpar_campos():
-    for entry in [entry_lote, entry_codigo, entry_pacote, entry_volume, entry_pos]:
-        entry.delete(0, tk.END)
+    for e in [entry_lote, entry_codigo, entry_pacote, entry_volume, entry_pos]:
+        e.delete(0, tk.END)
     text_desc.delete("1.0", tk.END)
 
-# ============================================
-# INTERFACE TKINTER
-# ============================================
 root = tk.Tk()
-root.title("Gerador de Etiquetas - Versão 5")
+root.title("Gerador de Etiquetas - Versão 6")
 root.geometry("820x600")
 
 frame = ttk.LabelFrame(root, text="Dados da Etiqueta")
