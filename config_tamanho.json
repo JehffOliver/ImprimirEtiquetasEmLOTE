@@ -1,0 +1,10 @@
+{
+    "etiqueta_largura": 104.5,
+    "etiqueta_altura": 34.0,
+    "margem_esquerda": 0.0,
+    "margem_superior": 0.0,
+    "espacamento_colunas": 3.0,
+    "qr_margin_right": 2.0,
+    "qr_margin_bottom": 2.0,
+    "qr_code_tamanho": 20.0
+}
