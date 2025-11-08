@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+# Gerador de Etiquetas - Versão 12
+# Requisitos: reportlab, qrcode, pillow
+# pip install reportlab qrcode[pil] pillow
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 from reportlab.lib.pagesizes import A4
@@ -9,52 +14,56 @@ import json
 from io import BytesIO
 import os
 import webbrowser
-import textwrap
+import math
 
 # ==========================================================
-# CONFIGURAÇÕES PADRÃO
+# CONFIG PADRÃO
 # ==========================================================
 PADRAO_TAMANHO = {
-    "etiqueta_largura": 104.5,
-    "etiqueta_altura": 35.0,
-    "margem_esquerda": 0.0,
-    "margem_superior": 0.0,
-    "espacamento_colunas": 2.0,
-    "qr_code_x": 80.0,
-    "qr_code_y": 11.0,
-    "qr_code_tamanho": 22.0
+    "etiqueta_largura": 104.5,   # mm (usado como limite; é ajustado automaticamente para 2 colunas)
+    "etiqueta_altura": 33.0,     # mm (é ajustado automaticamente para caber as linhas)
+    "margem_esquerda": 0.0,      # mm margem interna do grid
+    "margem_superior": 0.0,      # mm margem interna do grid
+    "espacamento_colunas": 2.0   # mm entre colunas
 }
 
 PADRAO_MARGENS = {
-    "margem_superior_pagina": 0.0,
-    "margem_inferior_pagina": 0.0,
-    "margem_esquerda_pagina": 0.0,
-    "margem_direita_pagina": 0.0
+    "margem_superior_pagina": 0.0,   # mm
+    "margem_inferior_pagina": 0.0,   # mm
+    "margem_esquerda_pagina": 0.0,   # mm
+    "margem_direita_pagina": 0.0     # mm
 }
 
+# Posições internas de cada elemento medidos a partir do canto superior esquerdo da etiqueta
 PADRAO_POS = {
-    "codigo_x": 5.0, "codigo_y": 8.0, "codigo_fonte": 10.0,
-    "descricao_x": 5.0, "descricao_y": 14.0, "descricao_fonte": 9.0,
-    "lote_x": 5.0, "lote_y": 21.0, "lote_fonte": 9.0,
-    "pacote_x": 5.0, "pacote_y": 27.0, "pacote_fonte": 9.0,
-    "volume_x": 5.0, "volume_y": 33.0, "volume_fonte": 9.0,
-    "qr_code_x": 80.0, "qr_code_y": 11.0, "qr_code_tamanho": 22.0
+    # ATENÇÃO: o "código do produto" agora vem junto na descrição (linha 1). Estes campos de "codigo_*"
+    # ficam apenas por compatibilidade; o tamanho usado para a linha 1 será o descricao_fonte.
+    "codigo_x": 5.0, "codigo_y": 8.0, "codigo_fonte": 9.0,
+
+    "descricao_x": 5.0, "descricao_y": 12.0, "descricao_fonte": 9.0,   # Linha 1 (código / descrição) e Linha 2 (continuação)
+    "lote_x": 5.0,      "lote_y": 19.0, "lote_fonte": 9.0,
+    "pacote_x": 5.0,    "pacote_y": 25.0, "pacote_fonte": 9.0,
+    "volume_x": 5.0,    "volume_y": 31.0, "volume_fonte": 9.0,
+
+    "qr_code_x": 80.0, "qr_code_y": 10.5, "qr_code_tamanho": 22.0  # Valores em mm dentro da etiqueta
 }
 
 # ==========================================================
-# GARANTIR EXISTÊNCIA DOS JSONS
+# LEITURA/GRAVAÇÃO DE JSON
 # ==========================================================
 def garantir_json(nome, padrao):
-    """Cria o JSON se não existir e adiciona chaves ausentes."""
+    """
+    Cria o JSON se não existir, e garante que todas as chaves do padrão existam.
+    """
     if not os.path.exists(nome):
         with open(nome, "w", encoding="utf-8") as f:
             json.dump(padrao, f, indent=4, ensure_ascii=False)
 
-    with open(nome, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(nome, "r", encoding="utf-8") as f:
             data = json.load(f)
-        except:
-            data = {}
+    except Exception:
+        data = {}
 
     alterado = False
     for k, v in padrao.items():
@@ -65,12 +74,11 @@ def garantir_json(nome, padrao):
     if alterado:
         with open(nome, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
-
     return data
 
 CONFIG_TAMANHO = garantir_json("config_tamanho.json", PADRAO_TAMANHO)
 CONFIG_MARGENS = garantir_json("config_margens.json", PADRAO_MARGENS)
-CONFIG_POS = garantir_json("config_posicionamento.json", PADRAO_POS)
+CONFIG_POS     = garantir_json("config_posicionamento.json", PADRAO_POS)
 
 def salvar_configuracao(arquivo, dados):
     with open(arquivo, "w", encoding="utf-8") as f:
@@ -78,145 +86,382 @@ def salvar_configuracao(arquivo, dados):
     messagebox.showinfo("Sucesso", f"Configuração salva em {arquivo}")
 
 # ==========================================================
-# EDITOR DE CONFIGURAÇÕES (CAIXAS ORGANIZADAS)
+# UTILS
 # ==========================================================
-def abrir_editor_config(titulo, config_dict, arquivo):
-    janela = tk.Toplevel(root)
-    janela.title(titulo)
-    janela.geometry("950x600")
+def ensure_os_prefix(lote_str: str) -> str:
+    s = lote_str.strip().upper()
+    if s.startswith("OS"):
+        return s
+    return "OS" + s
 
-    canvas_frame = tk.Canvas(janela)
-    scrollbar = ttk.Scrollbar(janela, orient="vertical", command=canvas_frame.yview)
-    scrollable_frame = ttk.Frame(canvas_frame)
+def wrap_text_to_lines(cnv, text, max_width_pts, font_name, font_size, max_lines=2):
+    """
+    Quebra de texto medindo a largura real da string via reportlab.
+    Retorna no máximo 'max_lines' linhas; se preciso, trunca com '...'.
+    """
+    words = text.replace("\r", " ").split()
+    lines, current = [], ""
+    for w in words:
+        test = (current + " " + w).strip()
+        if cnv.stringWidth(test, font_name, font_size) <= max_width_pts:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = w
+            if len(lines) >= max_lines:
+                break
+    if current and len(lines) < max_lines:
+        lines.append(current)
 
-    scrollable_frame.bind("<Configure>", lambda e: canvas_frame.configure(scrollregion=canvas_frame.bbox("all")))
-    canvas_frame.create_window((0, 0), window=scrollable_frame, anchor="nw")
-    canvas_frame.configure(yscrollcommand=scrollbar.set)
-    canvas_frame.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
+    # Trunca última linha se exceder
+    if lines:
+        last = lines[-1]
+        while cnv.stringWidth(last, font_name, font_size) > max_width_pts and len(last) > 0:
+            last = last[:-1]
+        if last != lines[-1]:
+            # reserva espaço para "..."
+            while cnv.stringWidth(last + "...", font_name, font_size) > max_width_pts and len(last) > 0:
+                last = last[:-1]
+            lines[-1] = last.rstrip() + "..."
+    return lines[:max_lines]
 
-    ttk.Label(scrollable_frame, text="Editar configurações (organizadas por seção):", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, pady=10)
+def make_qr_image(data, size_px=300):
+    qr = qrcode.QRCode(box_size=10, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    img = img.resize((size_px, size_px))
+    return img
 
-    # Cria frames lado a lado
-    grupos = {
-        "Código": ["codigo_x", "codigo_y", "codigo_fonte"],
-        "Descrição": ["descricao_x", "descricao_y", "descricao_fonte"],
-        "Lote": ["lote_x", "lote_y", "lote_fonte"],
-        "Pacote": ["pacote_x", "pacote_y", "pacote_fonte"],
-        "Volume": ["volume_x", "volume_y", "volume_fonte"],
-        "QR Code": ["qr_code_x", "qr_code_y", "qr_code_tamanho"]
-    }
-
+# ==========================================================
+# FORMULÁRIOS DE CONFIG (2×2 em todas as janelas)
+# ==========================================================
+def _form_duas_colunas(parent, campos, config_dict, labels_pt=None):
+    """
+    Renderiza pares (rótulo, entrada) em grade 2×2 por linha:
+    [label][entry] [label][entry]
+    """
     entradas = {}
-    col = 0
-    for titulo_grupo, campos in grupos.items():
-        frame_grupo = ttk.LabelFrame(scrollable_frame, text=titulo_grupo, padding=10)
-        frame_grupo.grid(row=1, column=col, padx=10, pady=10, sticky="n")
-        col += 1
+    for idx, campo in enumerate(campos):
+        linha = idx // 2
+        colpar = (idx % 2) * 2   # 0 ou 2
+        rotulo = labels_pt.get(campo, campo.replace("_", " ").capitalize()) if labels_pt else campo
 
-        for i, campo in enumerate(campos):
-            ttk.Label(frame_grupo, text=campo.replace("_", " ").capitalize()).grid(row=i, column=0, sticky="w", padx=5, pady=3)
-            entrada = ttk.Entry(frame_grupo, width=10)
-            entrada.insert(0, str(config_dict.get(campo, "")))
-            entrada.grid(row=i, column=1, padx=5, pady=3)
-            entradas[campo] = entrada
+        ttk.Label(parent, text=rotulo).grid(row=linha, column=colpar, sticky="w", padx=6, pady=4)
+        e = ttk.Entry(parent, width=10)
+        e.insert(0, str(config_dict.get(campo, "")))
+        e.grid(row=linha, column=colpar + 1, sticky="w", padx=6, pady=4)
+        entradas[campo] = e
+    # Ajuste de colunas para visual
+    parent.grid_columnconfigure(1, weight=1)
+    parent.grid_columnconfigure(3, weight=1)
+    return entradas
+
+def abrir_editor_tamanho():
+    janela = tk.Toplevel(root)
+    janela.title("Configurações de Tamanho")
+    janela.geometry("760x360")
+    janela.minsize(720, 340)
+
+    lf = ttk.LabelFrame(janela, text="Tamanho da Etiqueta e Espaçamentos")
+    lf.pack(fill="both", expand=True, padx=10, pady=10)
+
+    campos = [
+        "etiqueta_largura", "etiqueta_altura",
+        "margem_esquerda",  "margem_superior",
+        "espacamento_colunas"
+    ]
+    labels = {
+        "etiqueta_largura": "Largura (mm)",
+        "etiqueta_altura": "Altura (mm)",
+        "margem_esquerda": "Margem Esquerda (mm)",
+        "margem_superior": "Margem Superior (mm)",
+        "espacamento_colunas": "Espaço entre Colunas (mm)"
+    }
+    entradas = _form_duas_colunas(lf, campos, CONFIG_TAMANHO, labels)
+
+    # QR dentro da etiqueta (posição/tamanho)
+    lf_qr = ttk.LabelFrame(janela, text="QR Code (dentro da etiqueta)")
+    lf_qr.pack(fill="both", expand=True, padx=10, pady=(0,10))
+    campos_qr = ["qr_code_x", "qr_code_y", "qr_code_tamanho"]
+    labels_qr = {"qr_code_x": "QR X (mm)", "qr_code_y": "QR Y (mm)", "qr_code_tamanho": "QR Tamanho (mm)"}
+    entradas_qr = _form_duas_colunas(lf_qr, campos_qr, CONFIG_POS, labels_qr)  # QR fica em CONFIG_POS para coerência
 
     def salvar():
-        for k, v in entradas.items():
+        # tamanhos
+        for k, e in entradas.items():
             try:
-                config_dict[k] = float(v.get())
-            except:
-                config_dict[k] = v.get()
-        salvar_configuracao(arquivo, config_dict)
+                CONFIG_TAMANHO[k] = float(e.get())
+            except Exception:
+                pass
+        salvar_configuracao("config_tamanho.json", CONFIG_TAMANHO)
+
+        # QR
+        for k, e in entradas_qr.items():
+            try:
+                CONFIG_POS[k] = float(e.get())
+            except Exception:
+                pass
+        salvar_configuracao("config_posicionamento.json", CONFIG_POS)
         janela.destroy()
 
-    ttk.Button(scrollable_frame, text="Salvar", command=salvar).grid(row=2, column=0, pady=20)
-    ttk.Button(scrollable_frame, text="Cancelar", command=janela.destroy).grid(row=2, column=1, pady=20)
+    btns = ttk.Frame(janela)
+    btns.pack(pady=8)
+    ttk.Button(btns, text="Salvar", command=salvar).pack(side="left", padx=6)
+    ttk.Button(btns, text="Cancelar", command=janela.destroy).pack(side="left", padx=6)
+
+def abrir_editor_margens():
+    janela = tk.Toplevel(root)
+    janela.title("Configurações de Margens da Página")
+    janela.geometry("760x240")
+    janela.minsize(720, 220)
+
+    lf = ttk.LabelFrame(janela, text="Margens da Página (A4)")
+    lf.pack(fill="both", expand=True, padx=10, pady=10)
+
+    campos = ["margem_superior_pagina", "margem_inferior_pagina",
+              "margem_esquerda_pagina", "margem_direita_pagina"]
+    labels = {
+        "margem_superior_pagina": "Superior (mm)",
+        "margem_inferior_pagina": "Inferior (mm)",
+        "margem_esquerda_pagina": "Esquerda (mm)",
+        "margem_direita_pagina": "Direita (mm)"
+    }
+    entradas = _form_duas_colunas(lf, campos, CONFIG_MARGENS, labels)
+
+    def salvar():
+        for k, e in entradas.items():
+            try:
+                CONFIG_MARGENS[k] = float(e.get())
+            except Exception:
+                pass
+        salvar_configuracao("config_margens.json", CONFIG_MARGENS)
+        janela.destroy()
+
+    btns = ttk.Frame(janela)
+    btns.pack(pady=8)
+    ttk.Button(btns, text="Salvar", command=salvar).pack(side="left", padx=6)
+    ttk.Button(btns, text="Cancelar", command=janela.destroy).pack(side="left", padx=6)
+
+def abrir_editor_posicao():
+    janela = tk.Toplevel(root)
+    janela.title("Configurações de Posição e Fonte")
+    janela.geometry("960x520")
+    janela.minsize(920, 480)
+
+    # Grupos
+    frame = ttk.Frame(janela)
+    frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    grupos = [
+        ("Descrição (inclui 'código / descrição')",
+         ["descricao_x", "descricao_y", "descricao_fonte"], {
+            "descricao_x": "Desc X (mm)",
+            "descricao_y": "Desc Y (mm)",
+            "descricao_fonte": "Desc Fonte (pt)"
+         }),
+
+        ("Lote", ["lote_x", "lote_y", "lote_fonte"], {
+            "lote_x": "Lote X (mm)", "lote_y": "Lote Y (mm)", "lote_fonte": "Lote Fonte (pt)"
+        }),
+
+        ("Pacote", ["pacote_x", "pacote_y", "pacote_fonte"], {
+            "pacote_x": "Pacote X (mm)", "pacote_y": "Pacote Y (mm)", "pacote_fonte": "Pacote Fonte (pt)"
+        }),
+
+        ("Volume", ["volume_x", "volume_y", "volume_fonte"], {
+            "volume_x": "Volume X (mm)", "volume_y": "Volume Y (mm)", "volume_fonte": "Volume Fonte (pt)"
+        }),
+
+        ("QR Code", ["qr_code_x", "qr_code_y", "qr_code_tamanho"], {
+            "qr_code_x": "QR X (mm)", "qr_code_y": "QR Y (mm)", "qr_code_tamanho": "QR Tamanho (mm)"
+        })
+    ]
+
+    entradas = {}
+    for i, (titulo, campos, labels) in enumerate(grupos):
+        lf = ttk.LabelFrame(frame, text=titulo)
+        lf.grid(row=i // 2, column=i % 2, sticky="nsew", padx=8, pady=8)
+        ent = _form_duas_colunas(lf, campos, CONFIG_POS, labels)
+        entradas.update(ent)
+
+    for c in range(2):
+        frame.grid_columnconfigure(c, weight=1)
+
+    def salvar():
+        for k, e in entradas.items():
+            try:
+                CONFIG_POS[k] = float(e.get())
+            except Exception:
+                pass
+        salvar_configuracao("config_posicionamento.json", CONFIG_POS)
+        janela.destroy()
+
+    btns = ttk.Frame(janela)
+    btns.pack(pady=8)
+    ttk.Button(btns, text="Salvar", command=salvar).pack(side="left", padx=6)
+    ttk.Button(btns, text="Cancelar", command=janela.destroy).pack(side="left", padx=6)
 
 # ==========================================================
-# GERAR ETIQUETAS
+# GERAÇÃO DO PDF
 # ==========================================================
 def gerar_pdf(dados):
     try:
+        lote = ensure_os_prefix(dados["lote"])
+        codigo = dados["codigo_produto"].strip()
+        descricao = dados["descricao"].strip()
+        pacote = str(dados["pacote"]).strip()
+        try:
+            total_volumes = int(dados["total_volumes"])
+        except Exception:
+            messagebox.showerror("Erro", "Volume total inválido (use número inteiro).")
+            return
+
+        try:
+            per_page = max(1, int(dados["quantidade"]))
+        except Exception:
+            messagebox.showerror("Erro", "Quantidade por página inválida (use número inteiro).")
+            return
+
+        # Limita a no máximo 18 por página (2 colunas x 9 linhas)
+        if per_page > 18:
+            per_page = 18
+
+        # Layout base
+        COLS = 2
+        ROWS = math.ceil(per_page / COLS)
+
         nome_arquivo = "etiquetas.pdf"
         c = canvas.Canvas(nome_arquivo, pagesize=A4)
 
-        LARGURA = CONFIG_TAMANHO["etiqueta_largura"] * mm
-        ALTURA = CONFIG_TAMANHO["etiqueta_altura"] * mm
-        MARGEM_ESQ = CONFIG_TAMANHO["margem_esquerda"] * mm
-        MARGEM_SUP = CONFIG_TAMANHO["margem_superior"] * mm
+        # Dimensões de página (pt)
+        page_w, page_h = A4
+
+        # Margens de página (mm -> pt)
+        m_top  = CONFIG_MARGENS["margem_superior_pagina"] * mm
+        m_bot  = CONFIG_MARGENS["margem_inferior_pagina"] * mm
+        m_left = CONFIG_MARGENS["margem_esquerda_pagina"] * mm
+        m_right= CONFIG_MARGENS["margem_direita_pagina"] * mm
+
+        # Área útil da página
+        usable_w = page_w  - (m_left + m_right)
+        usable_h = page_h  - (m_top + m_bot)
+
+        # Espaçamento entre colunas
         ESPACO_H = CONFIG_TAMANHO["espacamento_colunas"] * mm
 
-        etiquetas_geradas = int(dados["quantidade"])
-        linha, coluna = 0, 0
+        # Largura/altura efetivas para caber exatamente COLS x ROWS na área útil
+        LARGURA = (usable_w - (COLS - 1) * ESPACO_H) / COLS
 
-        for i in range(1, etiquetas_geradas + 1):
-            x = MARGEM_ESQ + coluna * (LARGURA + ESPACO_H)
-            y = A4[1] - MARGEM_SUP - (linha + 1) * ALTURA
+        # Começamos com a altura configurada, mas se não couber, ajustamos para ocupar 100% da altura útil
+        ALTURA_cfg = CONFIG_TAMANHO["etiqueta_altura"] * mm
+        ALTURA = min(ALTURA_cfg, usable_h / ROWS)
+        # Se a altura configurada for maior do que cabe, usamos a exata que preenche a página
+        if ROWS * ALTURA_cfg > usable_h:
+            ALTURA = usable_h / ROWS
 
-            codigo = dados["codigo_produto"]
-            descricao = dados["descricao"]
-            lote = f"OS{dados['lote']}"
-            pacote = f"PACOTE COM {dados['pacote']} UN"
-            volume = f"VOLUME {i}/{dados['total_volumes']}"
-            primeira_linha = f"{codigo} /"
+        # Posições relativas internas (mm -> pt)
+        pos = CONFIG_POS
 
-            # Divide descrição longa em até 2 linhas
-            descricao_linhas = textwrap.wrap(descricao, width=50)[:2]
+        # Fonte da descrição (também usada para a primeira linha "código / descrição")
+        fonte_desc = pos.get("descricao_fonte", 9)
+        fonte_lote = pos.get("lote_fonte", 9)
+        fonte_pac  = pos.get("pacote_fonte", 9)
+        fonte_vol  = pos.get("volume_fonte", 9)
 
-            # QR CODE
-            qr_texto = f"|{codigo}|{lote}|{dados['pacote']}|{descricao}"
-            qr = qrcode.make(qr_texto)
-            buf = BytesIO()
-            qr.save(buf, format="PNG")
-            buf.seek(0)
-            img = ImageReader(buf)
+        # QR
+        qr_x_mm = pos.get("qr_code_x", 80.0)
+        qr_y_mm = pos.get("qr_code_y", 10.5)
+        qr_sz_mm= pos.get("qr_code_tamanho", 22.0)
 
-            # Texto principal
-            c.setFont("Helvetica-Bold", CONFIG_POS["codigo_fonte"])
-            c.drawString(x + CONFIG_POS["codigo_x"] * mm,
-                         y + ALTURA - CONFIG_POS["codigo_y"] * mm,
-                         primeira_linha)
+        # Cálculo de páginas
+        paginas = math.ceil(total_volumes / per_page) if total_volumes > 0 else 1
+        contador = 1
 
-            c.setFont("Helvetica", CONFIG_POS["descricao_fonte"])
-            for j, linha_desc in enumerate(descricao_linhas):
-                c.drawString(x + CONFIG_POS["descricao_x"] * mm,
-                             y + ALTURA - (CONFIG_POS["descricao_y"] + j * 4) * mm,
-                             linha_desc)
+        for p in range(paginas):
+            for idx in range(per_page):
+                if contador > total_volumes:
+                    break
 
-            c.setFont("Helvetica", CONFIG_POS["lote_fonte"])
-            c.drawString(x + CONFIG_POS["lote_x"] * mm,
-                         y + ALTURA - CONFIG_POS["lote_y"] * mm,
-                         f"Número do Lote: {lote}")
+                col = idx % COLS
+                row = idx // COLS
 
-            c.setFont("Helvetica", CONFIG_POS["pacote_fonte"])
-            c.drawString(x + CONFIG_POS["pacote_x"] * mm,
-                         y + ALTURA - CONFIG_POS["pacote_y"] * mm,
-                         pacote)
+                # Origem da etiqueta (canto inferior esquerdo) dentro da página
+                x0 = m_left + col * (LARGURA + ESPACO_H)
+                y0 = page_h - m_top - (row + 1) * ALTURA
 
-            c.setFont("Helvetica", CONFIG_POS["volume_fonte"])
-            c.drawString(x + CONFIG_POS["volume_x"] * mm,
-                         y + ALTURA - CONFIG_POS["volume_y"] * mm,
-                         volume)
+                # --- Montagem dos textos
+                # 1) "código / descrição" com quebra de até 2 linhas
+                texto_full = f"{codigo} / {descricao}" if descricao else f"{codigo}"
+                # Largura máxima disponível para texto à esquerda do QR
+                qr_w = qr_sz_mm * mm
+                text_left = x0 + pos.get("descricao_x", 5.0) * mm
+                text_right_lim = x0 + LARGURA - 6 * mm - qr_w  # reserva 6 mm de respiro
+                max_width = max(10, text_right_lim - text_left)
 
-            # QR Code alinhado
-            c.drawImage(img,
-                        x + CONFIG_POS["qr_code_x"] * mm,
-                        y + CONFIG_POS["qr_code_y"] * mm,
-                        CONFIG_POS["qr_code_tamanho"] * mm,
-                        CONFIG_POS["qr_code_tamanho"] * mm)
+                c.setFont("Helvetica", fonte_desc)
+                linhas_desc = wrap_text_to_lines(c, texto_full, max_width, "Helvetica", fonte_desc, max_lines=2)
 
-            coluna += 1
-            if coluna >= 2:
-                coluna = 0
-                linha += 1
-            if linha >= 8:
+                # 2) Lote
+                txt_lote = f"Número do Lote: {lote}"
+
+                # 3) Pacote (4 dígitos)
+                txt_pac = f"PACOTE COM {str(pacote).zfill(4)} UN"
+
+                # 4) Volume
+                txt_vol = f"VOLUME {contador}/{total_volumes}"
+
+                # --- Desenho
+                # Descrição (2 linhas máx.)
+                base_top = y0 + ALTURA
+                for j, linha in enumerate(linhas_desc):
+                    y_text = base_top - (pos.get("descricao_y", 12.0) + j * 4.0) * mm
+                    c.drawString(text_left, y_text, linha)
+
+                # Lote
+                c.setFont("Helvetica", fonte_lote)
+                c.drawString(x0 + pos.get("lote_x", 5.0) * mm,
+                             base_top - pos.get("lote_y", 19.0) * mm,
+                             txt_lote)
+
+                # Pacote
+                c.setFont("Helvetica", fonte_pac)
+                c.drawString(x0 + pos.get("pacote_x", 5.0) * mm,
+                             base_top - pos.get("pacote_y", 25.0) * mm,
+                             txt_pac)
+
+                # Volume
+                c.setFont("Helvetica", fonte_vol)
+                c.drawString(x0 + pos.get("volume_x", 5.0) * mm,
+                             base_top - pos.get("volume_y", 31.0) * mm,
+                             txt_vol)
+
+                # QR Code — formato: " |CODIGO|OSnn-nnnnnn|PPPP|DESCRICAO "
+                qr_payload = f" |{codigo}|{lote}|{str(pacote).zfill(4)}|{descricao} "
+                qr_img = make_qr_image(qr_payload, size_px=600)
+                buf = BytesIO()
+                qr_img.save(buf, format="PNG")
+                buf.seek(0)
+
+                c.drawImage(
+                    ImageReader(buf),
+                    x0 + qr_x_mm * mm,
+                    y0 + qr_y_mm * mm,
+                    qr_sz_mm * mm,
+                    qr_sz_mm * mm,
+                    preserveAspectRatio=True,
+                    mask='auto'
+                )
+
+                contador += 1
+
+            if p < paginas - 1:
                 c.showPage()
-                linha = 0
 
         c.save()
-        webbrowser.open_new_tab(nome_arquivo)
-        messagebox.showinfo("Sucesso", "Etiquetas geradas e abertas automaticamente!")
+        webbrowser.open_new_tab(os.path.abspath(nome_arquivo))
+        messagebox.showinfo("Sucesso", f"{total_volumes} etiquetas geradas em {paginas} página(s).")
     except Exception as e:
         messagebox.showerror("Erro", str(e))
 
@@ -230,65 +475,89 @@ def gerar_etiqueta():
         "descricao": text_desc.get("1.0", tk.END).strip(),
         "pacote": entry_pacote.get(),
         "total_volumes": entry_volume.get(),
-        "quantidade": entry_pos.get()
+        "quantidade": entry_qtd_pag.get()
     }
-    if not all(dados.values()):
-        messagebox.showwarning("Campos obrigatórios", "Preencha todos os campos.")
+    # Validação simples
+    if not dados["lote"] or not dados["codigo_produto"] or not dados["descricao"] \
+       or not dados["pacote"] or not dados["total_volumes"] or not dados["quantidade"]:
+        messagebox.showwarning("Atenção", "Preencha todos os campos.")
         return
     gerar_pdf(dados)
 
 def limpar_campos():
-    for e in [entry_lote, entry_codigo, entry_pacote, entry_volume, entry_pos]:
-        e.delete(0, tk.END)
+    entry_lote.delete(0, tk.END)
+    entry_codigo.delete(0, tk.END)
     text_desc.delete("1.0", tk.END)
+    entry_pacote.delete(0, tk.END)
+    entry_volume.delete(0, tk.END)
+    entry_qtd_pag.delete(0, tk.END)
 
-# ==========================================================
-# TKINTER PRINCIPAL
-# ==========================================================
+    # Repor exemplos
+    entry_lote.insert(0, "25-004855")  # "OS" será adicionado automaticamente
+    entry_codigo.insert(0, "132483")
+    text_desc.insert("1.0", "Tbe IPP 200L AZ 10,3 KG RE BJBR SL Tolerancia MIN10,0 KG - ECZLJ")
+    entry_pacote.insert(0, "0001")
+    entry_volume.insert(0, "480")
+    entry_qtd_pag.insert(0, "18")
+
+# ---- Janela
 root = tk.Tk()
-root.title("Gerador de Etiquetas - Versão 9")
-root.geometry("850x620")
+root.title("Gerador de Etiquetas - Versão 12")
+root.geometry("880x640")
+root.minsize(860, 620)
 
-frame = ttk.LabelFrame(root, text="Dados da Etiqueta")
-frame.pack(fill="x", padx=10, pady=10)
+# Tema simples mais limpo
+try:
+    style = ttk.Style()
+    if "vista" in style.theme_names():
+        style.theme_use("vista")
+    else:
+        style.theme_use("clam")
+    style.configure("TLabel", padding=2)
+    style.configure("TButton", padding=6)
+except Exception:
+    pass
 
-ttk.Label(frame, text="Número do Lote (OS)").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-entry_lote = ttk.Entry(frame, width=25)
-entry_lote.grid(row=0, column=1, padx=5, pady=5)
+frm = ttk.LabelFrame(root, text="Dados da Etiqueta")
+frm.pack(fill="x", padx=12, pady=12)
 
-ttk.Label(frame, text="Código do Produto").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-entry_codigo = ttk.Entry(frame, width=25)
-entry_codigo.grid(row=1, column=1, padx=5, pady=5)
+# Campos (pré-preenchidos como exemplo)
+ttk.Label(frm, text="Número do Lote (OS)").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+entry_lote = ttk.Entry(frm, width=22)
+entry_lote.grid(row=0, column=1, sticky="w", padx=6, pady=6)
 
-ttk.Label(frame, text="Descrição").grid(row=2, column=0, sticky="nw", padx=5, pady=5)
-text_desc = tk.Text(frame, width=40, height=4)
-text_desc.grid(row=2, column=1, padx=5, pady=5)
+ttk.Label(frm, text="Código do Produto").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+entry_codigo = ttk.Entry(frm, width=22)
+entry_codigo.grid(row=1, column=1, sticky="w", padx=6, pady=6)
 
-ttk.Label(frame, text="Pacote").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-entry_pacote = ttk.Entry(frame, width=10)
-entry_pacote.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+ttk.Label(frm, text="Descrição").grid(row=2, column=0, sticky="nw", padx=6, pady=6)
+text_desc = tk.Text(frm, width=50, height=4)
+text_desc.grid(row=2, column=1, sticky="w", padx=6, pady=6)
 
-ttk.Label(frame, text="Volume total").grid(row=4, column=0, sticky="w", padx=5, pady=5)
-entry_volume = ttk.Entry(frame, width=10)
-entry_volume.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+ttk.Label(frm, text="Pacote").grid(row=3, column=0, sticky="w", padx=6, pady=6)
+entry_pacote = ttk.Entry(frm, width=10)
+entry_pacote.grid(row=3, column=1, sticky="w", padx=6, pady=6)
 
-pos_frame = ttk.Frame(root)
-pos_frame.pack(fill="x", padx=10, pady=5)
-ttk.Label(pos_frame, text="Quantidade por Página (1–16):").pack(side="left", padx=5)
-entry_pos = ttk.Entry(pos_frame, width=5)
-entry_pos.insert(0, "16")
-entry_pos.pack(side="left", padx=5)
+ttk.Label(frm, text="Volume total").grid(row=4, column=0, sticky="w", padx=6, pady=6)
+entry_volume = ttk.Entry(frm, width=10)
+entry_volume.grid(row=4, column=1, sticky="w", padx=6, pady=6)
 
-btn_frame = ttk.Frame(root)
-btn_frame.pack(fill="x", padx=10, pady=10)
+frm2 = ttk.Frame(root)
+frm2.pack(fill="x", padx=12, pady=(0,12))
+ttk.Label(frm2, text="Quantidade por Página (1–18):").pack(side="left", padx=6)
+entry_qtd_pag = ttk.Entry(frm2, width=5)
+entry_qtd_pag.pack(side="left", padx=6)
 
-ttk.Button(btn_frame, text="Configurar Tamanho",
-           command=lambda: abrir_editor_config("Configurações de Tamanho", CONFIG_TAMANHO, "config_tamanho.json")).pack(side="left", padx=5)
-ttk.Button(btn_frame, text="Configurar Posição",
-           command=lambda: abrir_editor_config("Configurações de Posição", CONFIG_POS, "config_posicionamento.json")).pack(side="left", padx=5)
-ttk.Button(btn_frame, text="Configurar Margens",
-           command=lambda: abrir_editor_config("Configurações de Margens", CONFIG_MARGENS, "config_margens.json")).pack(side="left", padx=5)
-ttk.Button(btn_frame, text="Gerar Etiqueta", command=gerar_etiqueta).pack(side="left", padx=5)
-ttk.Button(btn_frame, text="Limpar", command=limpar_campos).pack(side="left", padx=5)
+# Botões
+btns = ttk.Frame(root)
+btns.pack(fill="x", padx=12, pady=8)
+ttk.Button(btns, text="Configurar Tamanho", command=abrir_editor_tamanho).pack(side="left", padx=6)
+ttk.Button(btns, text="Configurar Posição", command=abrir_editor_posicao).pack(side="left", padx=6)
+ttk.Button(btns, text="Configurar Margens", command=abrir_editor_margens).pack(side="left", padx=6)
+ttk.Button(btns, text="Gerar Etiqueta", command=gerar_etiqueta).pack(side="left", padx=6)
+ttk.Button(btns, text="Limpar", command=limpar_campos).pack(side="left", padx=6)
+
+# Preenchimento exemplo
+limpar_campos()
 
 root.mainloop()
