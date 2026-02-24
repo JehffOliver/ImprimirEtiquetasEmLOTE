@@ -438,7 +438,9 @@ def gerar_pdf(dados):
                              txt_vol)
 
                 # QR Code — formato: " |CODIGO|OSnn-nnnnnn|PPPP|DESCRICAO "
-                qr_payload = f" |{codigo}|{lote}|{str(pacote).zfill(4)}|{descricao} "
+                # [REF:QR_PAYLOAD] QR Code — formato: |CODIGO|OS...|PACOTE|VOLUME|DESCRICAO
+                vol = str(contador).zfill(4)  # 0001, 0002...
+                qr_payload = f"|{codigo}|{lote}|{str(pacote).zfill(4)}|{vol}|{descricao}"
                 qr_img = make_qr_image(qr_payload, size_px=600)
                 buf = BytesIO()
                 qr_img.save(buf, format="PNG")
