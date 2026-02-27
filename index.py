@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Gerador de Etiquetas - Versão 12
+# Gerador de Etiquetas - Versão 13 (QR novo)
 # Requisitos: reportlab, qrcode, pillow
 # pip install reportlab qrcode[pil] pillow
 
@@ -15,6 +15,9 @@ from io import BytesIO
 import os
 import webbrowser
 import math
+import random
+import string
+from datetime import datetime
 
 # ==========================================================
 # CONFIG PADRÃO
@@ -34,27 +37,21 @@ PADRAO_MARGENS = {
     "margem_direita_pagina": 0.0     # mm
 }
 
-# Posições internas de cada elemento medidos a partir do canto superior esquerdo da etiqueta
 PADRAO_POS = {
-    # ATENÇÃO: o "código do produto" agora vem junto na descrição (linha 1). Estes campos de "codigo_*"
-    # ficam apenas por compatibilidade; o tamanho usado para a linha 1 será o descricao_fonte.
     "codigo_x": 5.0, "codigo_y": 8.0, "codigo_fonte": 9.0,
 
-    "descricao_x": 5.0, "descricao_y": 12.0, "descricao_fonte": 9.0,   # Linha 1 (código / descrição) e Linha 2 (continuação)
+    "descricao_x": 5.0, "descricao_y": 12.0, "descricao_fonte": 9.0,
     "lote_x": 5.0,      "lote_y": 19.0, "lote_fonte": 9.0,
     "pacote_x": 5.0,    "pacote_y": 25.0, "pacote_fonte": 9.0,
     "volume_x": 5.0,    "volume_y": 31.0, "volume_fonte": 9.0,
 
-    "qr_code_x": 80.0, "qr_code_y": 10.5, "qr_code_tamanho": 22.0  # Valores em mm dentro da etiqueta
+    "qr_code_x": 80.0, "qr_code_y": 10.5, "qr_code_tamanho": 22.0
 }
 
 # ==========================================================
 # LEITURA/GRAVAÇÃO DE JSON
 # ==========================================================
 def garantir_json(nome, padrao):
-    """
-    Cria o JSON se não existir, e garante que todas as chaves do padrão existam.
-    """
     if not os.path.exists(nome):
         with open(nome, "w", encoding="utf-8") as f:
             json.dump(padrao, f, indent=4, ensure_ascii=False)
@@ -94,11 +91,13 @@ def ensure_os_prefix(lote_str: str) -> str:
         return s
     return "OS" + s
 
+def gerar_chave_unica():
+    # YYYYMMDD + 6 caracteres aleatórios
+    dt = datetime.now().strftime("%Y%m%d")
+    rand = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    return f"{dt}{rand}"
+
 def wrap_text_to_lines(cnv, text, max_width_pts, font_name, font_size, max_lines=2):
-    """
-    Quebra de texto medindo a largura real da string via reportlab.
-    Retorna no máximo 'max_lines' linhas; se preciso, trunca com '...'.
-    """
     words = text.replace("\r", " ").split()
     lines, current = [], ""
     for w in words:
@@ -114,13 +113,11 @@ def wrap_text_to_lines(cnv, text, max_width_pts, font_name, font_size, max_lines
     if current and len(lines) < max_lines:
         lines.append(current)
 
-    # Trunca última linha se exceder
     if lines:
         last = lines[-1]
         while cnv.stringWidth(last, font_name, font_size) > max_width_pts and len(last) > 0:
             last = last[:-1]
         if last != lines[-1]:
-            # reserva espaço para "..."
             while cnv.stringWidth(last + "...", font_name, font_size) > max_width_pts and len(last) > 0:
                 last = last[:-1]
             lines[-1] = last.rstrip() + "..."
@@ -135,17 +132,13 @@ def make_qr_image(data, size_px=300):
     return img
 
 # ==========================================================
-# FORMULÁRIOS DE CONFIG (2×2 em todas as janelas)
+# FORMULÁRIOS
 # ==========================================================
 def _form_duas_colunas(parent, campos, config_dict, labels_pt=None):
-    """
-    Renderiza pares (rótulo, entrada) em grade 2×2 por linha:
-    [label][entry] [label][entry]
-    """
     entradas = {}
     for idx, campo in enumerate(campos):
         linha = idx // 2
-        colpar = (idx % 2) * 2   # 0 ou 2
+        colpar = (idx % 2) * 2
         rotulo = labels_pt.get(campo, campo.replace("_", " ").capitalize()) if labels_pt else campo
 
         ttk.Label(parent, text=rotulo).grid(row=linha, column=colpar, sticky="w", padx=6, pady=4)
@@ -153,7 +146,6 @@ def _form_duas_colunas(parent, campos, config_dict, labels_pt=None):
         e.insert(0, str(config_dict.get(campo, "")))
         e.grid(row=linha, column=colpar + 1, sticky="w", padx=6, pady=4)
         entradas[campo] = e
-    # Ajuste de colunas para visual
     parent.grid_columnconfigure(1, weight=1)
     parent.grid_columnconfigure(3, weight=1)
     return entradas
@@ -181,15 +173,13 @@ def abrir_editor_tamanho():
     }
     entradas = _form_duas_colunas(lf, campos, CONFIG_TAMANHO, labels)
 
-    # QR dentro da etiqueta (posição/tamanho)
     lf_qr = ttk.LabelFrame(janela, text="QR Code (dentro da etiqueta)")
     lf_qr.pack(fill="both", expand=True, padx=10, pady=(0,10))
     campos_qr = ["qr_code_x", "qr_code_y", "qr_code_tamanho"]
     labels_qr = {"qr_code_x": "QR X (mm)", "qr_code_y": "QR Y (mm)", "qr_code_tamanho": "QR Tamanho (mm)"}
-    entradas_qr = _form_duas_colunas(lf_qr, campos_qr, CONFIG_POS, labels_qr)  # QR fica em CONFIG_POS para coerência
+    entradas_qr = _form_duas_colunas(lf_qr, campos_qr, CONFIG_POS, labels_qr)
 
     def salvar():
-        # tamanhos
         for k, e in entradas.items():
             try:
                 CONFIG_TAMANHO[k] = float(e.get())
@@ -197,7 +187,6 @@ def abrir_editor_tamanho():
                 pass
         salvar_configuracao("config_tamanho.json", CONFIG_TAMANHO)
 
-        # QR
         for k, e in entradas_qr.items():
             try:
                 CONFIG_POS[k] = float(e.get())
@@ -250,7 +239,6 @@ def abrir_editor_posicao():
     janela.geometry("960x520")
     janela.minsize(920, 480)
 
-    # Grupos
     frame = ttk.Frame(janela)
     frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -324,58 +312,45 @@ def gerar_pdf(dados):
             messagebox.showerror("Erro", "Quantidade por página inválida (use número inteiro).")
             return
 
-        # Limita a no máximo 18 por página (2 colunas x 9 linhas)
         if per_page > 18:
             per_page = 18
 
-        # Layout base
         COLS = 2
         ROWS = math.ceil(per_page / COLS)
 
         nome_arquivo = "etiquetas.pdf"
         c = canvas.Canvas(nome_arquivo, pagesize=A4)
 
-        # Dimensões de página (pt)
         page_w, page_h = A4
 
-        # Margens de página (mm -> pt)
         m_top  = CONFIG_MARGENS["margem_superior_pagina"] * mm
         m_bot  = CONFIG_MARGENS["margem_inferior_pagina"] * mm
         m_left = CONFIG_MARGENS["margem_esquerda_pagina"] * mm
         m_right= CONFIG_MARGENS["margem_direita_pagina"] * mm
 
-        # Área útil da página
         usable_w = page_w  - (m_left + m_right)
         usable_h = page_h  - (m_top + m_bot)
 
-        # Espaçamento entre colunas
         ESPACO_H = CONFIG_TAMANHO["espacamento_colunas"] * mm
 
-        # Largura/altura efetivas para caber exatamente COLS x ROWS na área útil
         LARGURA = (usable_w - (COLS - 1) * ESPACO_H) / COLS
 
-        # Começamos com a altura configurada, mas se não couber, ajustamos para ocupar 100% da altura útil
         ALTURA_cfg = CONFIG_TAMANHO["etiqueta_altura"] * mm
         ALTURA = min(ALTURA_cfg, usable_h / ROWS)
-        # Se a altura configurada for maior do que cabe, usamos a exata que preenche a página
         if ROWS * ALTURA_cfg > usable_h:
             ALTURA = usable_h / ROWS
 
-        # Posições relativas internas (mm -> pt)
         pos = CONFIG_POS
 
-        # Fonte da descrição (também usada para a primeira linha "código / descrição")
         fonte_desc = pos.get("descricao_fonte", 9)
         fonte_lote = pos.get("lote_fonte", 9)
         fonte_pac  = pos.get("pacote_fonte", 9)
         fonte_vol  = pos.get("volume_fonte", 9)
 
-        # QR
         qr_x_mm = pos.get("qr_code_x", 80.0)
         qr_y_mm = pos.get("qr_code_y", 10.5)
         qr_sz_mm= pos.get("qr_code_tamanho", 22.0)
 
-        # Cálculo de páginas
         paginas = math.ceil(total_volumes / per_page) if total_volumes > 0 else 1
         contador = 1
 
@@ -387,60 +362,50 @@ def gerar_pdf(dados):
                 col = idx % COLS
                 row = idx // COLS
 
-                # Origem da etiqueta (canto inferior esquerdo) dentro da página
                 x0 = m_left + col * (LARGURA + ESPACO_H)
                 y0 = page_h - m_top - (row + 1) * ALTURA
 
-                # --- Montagem dos textos
-                # 1) "código / descrição" com quebra de até 2 linhas
                 texto_full = f"{codigo} / {descricao}" if descricao else f"{codigo}"
-                # Largura máxima disponível para texto à esquerda do QR
                 qr_w = qr_sz_mm * mm
                 text_left = x0 + pos.get("descricao_x", 5.0) * mm
-                text_right_lim = x0 + LARGURA - 6 * mm - qr_w  # reserva 6 mm de respiro
+                text_right_lim = x0 + LARGURA - 6 * mm - qr_w
                 max_width = max(10, text_right_lim - text_left)
 
                 c.setFont("Helvetica", fonte_desc)
                 linhas_desc = wrap_text_to_lines(c, texto_full, max_width, "Helvetica", fonte_desc, max_lines=2)
 
-                # 2) Lote
                 txt_lote = f"Número do Lote: {lote}"
-
-                # 3) Pacote (4 dígitos)
-                txt_pac = f"PACOTE COM {str(pacote).zfill(4)} UN"
-
-                # 4) Volume
+                txt_pac = f"PACOTE COM {str(pacote).zfill(3)} UN"
                 txt_vol = f"VOLUME {contador}/{total_volumes}"
 
-                # --- Desenho
-                # Descrição (2 linhas máx.)
                 base_top = y0 + ALTURA
                 for j, linha in enumerate(linhas_desc):
                     y_text = base_top - (pos.get("descricao_y", 12.0) + j * 4.0) * mm
                     c.drawString(text_left, y_text, linha)
 
-                # Lote
                 c.setFont("Helvetica", fonte_lote)
                 c.drawString(x0 + pos.get("lote_x", 5.0) * mm,
                              base_top - pos.get("lote_y", 19.0) * mm,
                              txt_lote)
 
-                # Pacote
                 c.setFont("Helvetica", fonte_pac)
                 c.drawString(x0 + pos.get("pacote_x", 5.0) * mm,
                              base_top - pos.get("pacote_y", 25.0) * mm,
                              txt_pac)
 
-                # Volume
                 c.setFont("Helvetica", fonte_vol)
                 c.drawString(x0 + pos.get("volume_x", 5.0) * mm,
                              base_top - pos.get("volume_y", 31.0) * mm,
                              txt_vol)
 
-                # QR Code — formato: " |CODIGO|OSnn-nnnnnn|PPPP|DESCRICAO "
-                # [REF:QR_PAYLOAD] QR Code — formato: |CODIGO|OS...|PACOTE|VOLUME|DESCRICAO
-                vol = str(contador).zfill(4)  # 0001, 0002...
-                qr_payload = f"|{codigo}|{lote}|{str(pacote).zfill(4)}|{vol}|{descricao}"
+                # ===== QR Code NOVO =====
+                chave = gerar_chave_unica()
+                vol_atual = str(contador)
+                vol_total = str(total_volumes)
+                qtd_pacote = str(pacote).zfill(3)
+
+                qr_payload = f"{codigo}|{lote}|{qtd_pacote}|{descricao}|{vol_atual}|{vol_total}|{chave}"
+
                 qr_img = make_qr_image(qr_payload, size_px=600)
                 buf = BytesIO()
                 qr_img.save(buf, format="PNG")
@@ -479,7 +444,6 @@ def gerar_etiqueta():
         "total_volumes": entry_volume.get(),
         "quantidade": entry_qtd_pag.get()
     }
-    # Validação simples
     if not dados["lote"] or not dados["codigo_produto"] or not dados["descricao"] \
        or not dados["pacote"] or not dados["total_volumes"] or not dados["quantidade"]:
         messagebox.showwarning("Atenção", "Preencha todos os campos.")
@@ -494,21 +458,19 @@ def limpar_campos():
     entry_volume.delete(0, tk.END)
     entry_qtd_pag.delete(0, tk.END)
 
-    # Repor exemplos
-    entry_lote.insert(0, "25-004855")  # "OS" será adicionado automaticamente
+    entry_lote.insert(0, "25-004855")
     entry_codigo.insert(0, "132483")
     text_desc.insert("1.0", "Tbe IPP 200L AZ 10,3 KG RE BJBR SL Tolerancia MIN10,0 KG - ECZLJ")
-    entry_pacote.insert(0, "0001")
+    entry_pacote.insert(0, "008")
     entry_volume.insert(0, "480")
     entry_qtd_pag.insert(0, "18")
 
 # ---- Janela
 root = tk.Tk()
-root.title("Gerador de Etiquetas - Versão 12")
+root.title("Gerador de Etiquetas - Versão 13")
 root.geometry("880x640")
 root.minsize(860, 620)
 
-# Tema simples mais limpo
 try:
     style = ttk.Style()
     if "vista" in style.theme_names():
@@ -523,7 +485,6 @@ except Exception:
 frm = ttk.LabelFrame(root, text="Dados da Etiqueta")
 frm.pack(fill="x", padx=12, pady=12)
 
-# Campos (pré-preenchidos como exemplo)
 ttk.Label(frm, text="Número do Lote (OS)").grid(row=0, column=0, sticky="w", padx=6, pady=6)
 entry_lote = ttk.Entry(frm, width=22)
 entry_lote.grid(row=0, column=1, sticky="w", padx=6, pady=6)
@@ -550,7 +511,6 @@ ttk.Label(frm2, text="Quantidade por Página (1–18):").pack(side="left", padx=
 entry_qtd_pag = ttk.Entry(frm2, width=5)
 entry_qtd_pag.pack(side="left", padx=6)
 
-# Botões
 btns = ttk.Frame(root)
 btns.pack(fill="x", padx=12, pady=8)
 ttk.Button(btns, text="Configurar Tamanho", command=abrir_editor_tamanho).pack(side="left", padx=6)
@@ -559,7 +519,5 @@ ttk.Button(btns, text="Configurar Margens", command=abrir_editor_margens).pack(s
 ttk.Button(btns, text="Gerar Etiqueta", command=gerar_etiqueta).pack(side="left", padx=6)
 ttk.Button(btns, text="Limpar", command=limpar_campos).pack(side="left", padx=6)
 
-# Preenchimento exemplo
 limpar_campos()
-
 root.mainloop()
