@@ -91,8 +91,10 @@ CONFIG_LAYOUT = garantir_json(CONFIG_LAYOUT_ARQ, PADRAO_LAYOUT)
 # ==========================================================
 # UTILS
 # ==========================================================
-def ensure_os_prefix(lote_str: str) -> str:
-    s = lote_str.strip().upper()
+def ensure_os_prefix(valor: str) -> str:
+    s = str(valor or "").strip().upper()
+    if not s:
+        return ""
     if s.startswith("OS"):
         return s
     return "OS" + s
@@ -107,26 +109,111 @@ def zpl_escape(texto: str) -> str:
         return ""
     return str(texto).replace("^", " ").replace("~", " ").replace("\r", " ").replace("\n", " ")
 
-def quebrar_texto(texto, tamanho_max_linha=32, max_linhas=2):
+def normalizar_espacos(texto: str) -> str:
+    return " ".join(str(texto or "").replace("\n", " ").replace("\r", " ").split()).strip()
+
+def truncar_com_reticencias(texto, limite):
+    texto = str(texto or "")
+    if limite <= 0:
+        return ""
+    if len(texto) <= limite:
+        return texto
+    if limite == 1:
+        return "…"
+    return texto[:limite - 1].rstrip() + "…"
+
+def wrap_text_by_chars(texto, max_chars):
+    texto = normalizar_espacos(texto)
+    if not texto:
+        return []
+
+    max_chars = max(4, int(max_chars))
     palavras = texto.split()
     linhas = []
     atual = ""
 
     for palavra in palavras:
-        teste = (atual + " " + palavra).strip()
-        if len(teste) <= tamanho_max_linha:
+        if len(palavra) > max_chars:
+            if atual:
+                linhas.append(atual)
+                atual = ""
+
+            restante = palavra
+            while len(restante) > max_chars:
+                linhas.append(restante[:max_chars])
+                restante = restante[max_chars:]
+            if restante:
+                atual = restante
+            continue
+
+        teste = palavra if not atual else f"{atual} {palavra}"
+        if len(teste) <= max_chars:
             atual = teste
         else:
             if atual:
                 linhas.append(atual)
             atual = palavra
-            if len(linhas) >= max_linhas:
-                break
 
-    if atual and len(linhas) < max_linhas:
+    if atual:
         linhas.append(atual)
 
-    return linhas[:max_linhas]
+    return linhas
+
+def fit_description_layout(texto, cfg):
+    texto = normalizar_espacos(texto)
+
+    if not texto:
+        return {
+            "font": int(cfg["descricao_font"]),
+            "line_height": max(12, int(cfg["descricao_font"]) + 2),
+            "lines": [""],
+        }
+
+    desc_x = int(cfg["descricao_x"])
+    desc_y = int(cfg["descricao_y"])
+    lote_y = int(cfg["lote_y"])
+    qr_x = int(cfg["qr_x"])
+
+    available_width = max(120, qr_x - desc_x - 24)
+    available_height = max(18, lote_y - desc_y - 8)
+
+    preferred_font = int(cfg["descricao_font"])
+    min_font = 10
+    max_lines_cap = 6
+
+    for font in range(preferred_font, min_font - 1, -1):
+        char_width = max(5.0, font * 0.58)
+        max_chars = max(8, int(available_width / char_width))
+        line_height = max(font + 2, int(font * 1.18))
+        lines_by_height = max(1, available_height // line_height)
+        allowed_lines = max(1, min(max_lines_cap, lines_by_height))
+
+        lines = wrap_text_by_chars(texto, max_chars)
+        if len(lines) <= allowed_lines:
+            return {
+                "font": font,
+                "line_height": line_height,
+                "lines": lines,
+            }
+
+    font = min_font
+    char_width = max(5.0, font * 0.58)
+    max_chars = max(8, int(available_width / char_width))
+    line_height = max(font + 2, int(font * 1.18))
+    lines_by_height = max(1, available_height // line_height)
+    allowed_lines = max(1, min(max_lines_cap, lines_by_height))
+
+    lines = wrap_text_by_chars(texto, max_chars)
+    if len(lines) > allowed_lines:
+        lines = lines[:allowed_lines]
+        if lines:
+            lines[-1] = truncar_com_reticencias(lines[-1], max_chars)
+
+    return {
+        "font": font,
+        "line_height": line_height,
+        "lines": lines,
+    }
 
 # ==========================================================
 # IMPRESSORAS
@@ -177,28 +264,48 @@ def imprimir_zpl_na_impressora(nome_impressora, zpl):
 # ==========================================================
 # ZPL
 # ==========================================================
-def gerar_zpl_uma_etiqueta(codigo, descricao, lote, volume_atual, volume_total):
+def gerar_zpl_uma_etiqueta(
+    codigo,
+    descricao,
+    identificador,
+    volume_atual,
+    volume_total,
+    tipo_etiqueta="injetora",
+    qtd_pacote="1"
+):
     codigo = zpl_escape(codigo)
-    descricao = zpl_escape(descricao)
-    lote = zpl_escape(ensure_os_prefix(lote))
+
+    descricao_layout = fit_description_layout(
+        f"{codigo} / {normalizar_espacos(descricao)}" if descricao else codigo,
+        CONFIG_LAYOUT
+    )
+
+    identificador_limpo = zpl_escape(ensure_os_prefix(identificador))
     volume_atual = zpl_escape(str(volume_atual))
     volume_total = zpl_escape(str(volume_total))
     chave = gerar_chave_unica()
 
-    qr_payload = f"{codigo}|{lote}|{descricao}|{volume_atual}|{volume_total}|{chave}"
+    try:
+        qtd_pacote_int = int(str(qtd_pacote).strip())
+        if qtd_pacote_int <= 0:
+            qtd_pacote_int = 1
+    except Exception:
+        qtd_pacote_int = 1
 
-    texto_topo = f"{codigo} / {descricao}" if descricao else codigo
-    linhas_desc = quebrar_texto(texto_topo, tamanho_max_linha=32, max_linhas=2)
+    qtd_pacote_fmt = f"{qtd_pacote_int:04d}"
 
-    linha1 = linhas_desc[0] if len(linhas_desc) > 0 else ""
-    linha2 = linhas_desc[1] if len(linhas_desc) > 1 else ""
+    qr_payload = f"{codigo}|{identificador_limpo}|{qtd_pacote_int}|{zpl_escape(normalizar_espacos(descricao))}|{volume_atual}|{volume_total}|{chave}"
 
-    txt_lote = f"Lote: {lote}"
-    txt_vol = f"Volume {volume_atual}/{volume_total}"
+    if tipo_etiqueta == "sopradora":
+        txt_identificador = f"Número do Lote: {identificador_limpo}"
+    else:
+        txt_identificador = f"{identificador_limpo}"
+
+    txt_pacote = f"PACOTE COM {qtd_pacote_fmt} UN"
+    txt_vol = f"VOLUME {volume_atual}/{volume_total}"
 
     desc_x = int(CONFIG_LAYOUT["descricao_x"])
     desc_y = int(CONFIG_LAYOUT["descricao_y"])
-    desc_font = int(CONFIG_LAYOUT["descricao_font"])
 
     lote_x = int(CONFIG_LAYOUT["lote_x"])
     lote_y = int(CONFIG_LAYOUT["lote_y"])
@@ -212,8 +319,11 @@ def gerar_zpl_uma_etiqueta(codigo, descricao, lote, volume_atual, volume_total):
     qr_y = int(CONFIG_LAYOUT["qr_y"])
     qr_m = int(CONFIG_LAYOUT["qr_magnification"])
 
-    linha2_offset = int(CONFIG_LAYOUT["linha2_offset_y"])
     orient = CONFIG_LAYOUT.get("orientacao", "N")
+
+    pacote_x = lote_x
+    pacote_y = lote_y + max(34, lote_font + 10)
+    pacote_font = lote_font
 
     zpl = f"""
 ^XA
@@ -222,14 +332,15 @@ def gerar_zpl_uma_etiqueta(codigo, descricao, lote, volume_atual, volume_total):
 ^LH0,0
 ^CI28
 ^FWN
-^FO{desc_x},{desc_y}^A0{orient},{desc_font},{desc_font}^FD{linha1}^FS
 """
 
-    if linha2:
-        zpl += f"^FO{desc_x},{desc_y + linha2_offset}^A0{orient},{desc_font},{desc_font}^FD{linha2}^FS\n"
+    for idx, linha in enumerate(descricao_layout["lines"]):
+        y = desc_y + (idx * descricao_layout["line_height"])
+        zpl += f'^FO{desc_x},{y}^A0{orient},{descricao_layout["font"]},{descricao_layout["font"]}^FD{zpl_escape(linha)}^FS\n'
 
     zpl += f"""
-^FO{lote_x},{lote_y}^A0{orient},{lote_font},{lote_font}^FD{txt_lote}^FS
+^FO{lote_x},{lote_y}^A0{orient},{lote_font},{lote_font}^FD{txt_identificador}^FS
+^FO{pacote_x},{pacote_y}^A0{orient},{pacote_font},{pacote_font}^FD{txt_pacote}^FS
 ^FO{vol_x},{vol_y}^A0{orient},{vol_font},{vol_font}^FD{txt_vol}^FS
 ^FO{qr_x},{qr_y}^BQN,2,{qr_m}
 ^FDLA,{qr_payload}^FS
@@ -238,54 +349,167 @@ def gerar_zpl_uma_etiqueta(codigo, descricao, lote, volume_atual, volume_total):
     return zpl.strip() + "\n"
 
 def gerar_zpl_lote(dados, quantidade):
-    lote = dados["lote"].strip()
+    identificador = dados["identificador"].strip()
     codigo = dados["codigo_produto"].strip()
     descricao = dados["descricao"].strip()
+    tipo_etiqueta = dados.get("tipo_etiqueta", "injetora").strip().lower()
+    qtd_pacote = dados.get("qtd_pacote", "1")
+    ordem_invertida = bool(dados.get("ordem_invertida", False))
 
     total_volumes = int(dados["total_volumes"])
+    volume_inicial = int(dados["volume_inicial"])
+
     if total_volumes <= 0:
         raise ValueError("Volume total deve ser maior que zero.")
+
+    if volume_inicial <= 0:
+        raise ValueError("Volume inicial deve ser maior que zero.")
+
+    if volume_inicial > total_volumes:
+        raise ValueError("Volume inicial não pode ser maior que o volume total.")
 
     if quantidade <= 0:
         raise ValueError("Quantidade deve ser maior que zero.")
 
-    if quantidade > total_volumes:
-        raise ValueError("Quantidade de etiquetas não pode ser maior que o volume total.")
+    volume_final = volume_inicial + quantidade - 1
+    if volume_final > total_volumes:
+        raise ValueError(
+            f"O intervalo solicitado ultrapassa o volume total. "
+            f"Último volume seria {volume_final}, mas o total é {total_volumes}."
+        )
+
+    if ordem_invertida:
+        sequencia = range(volume_final, volume_inicial - 1, -1)
+    else:
+        sequencia = range(volume_inicial, volume_final + 1)
 
     etiquetas = []
-    for contador in range(1, quantidade + 1):
+    for volume_atual in sequencia:
         etiquetas.append(
             gerar_zpl_uma_etiqueta(
                 codigo=codigo,
                 descricao=descricao,
-                lote=lote,
-                volume_atual=contador,
+                identificador=identificador,
+                volume_atual=volume_atual,
                 volume_total=total_volumes,
+                tipo_etiqueta=tipo_etiqueta,
+                qtd_pacote=qtd_pacote,
             )
         )
     return "\n".join(etiquetas)
 
 # ==========================================================
-# DADOS
+# DADOS / FORMULÁRIOS
 # ==========================================================
-def coletar_dados():
+FORMULARIOS = {}
+notebook_modelos = None
+ordem_invertida_var = None
+
+def get_tipo_etiqueta_atual():
+    try:
+        aba_id = notebook_modelos.select()
+        return notebook_modelos.tab(aba_id, "text").strip().lower()
+    except Exception:
+        return "injetora"
+
+def get_formulario_atual():
+    return FORMULARIOS.get(get_tipo_etiqueta_atual(), FORMULARIOS.get("injetora", {}))
+
+def get_widget_value(widget):
+    if widget is None:
+        return ""
+    if isinstance(widget, tk.Text):
+        return widget.get("1.0", tk.END).strip()
+    return widget.get().strip()
+
+def criar_formulario_tipo(parent, tipo):
+    titulo = "Dados da Etiqueta - Sopradora" if tipo == "sopradora" else "Dados da Etiqueta - Injetora"
+
+    frm_dados = ttk.LabelFrame(parent, text=titulo, padding=10)
+    frm_dados.pack(fill="x", pady=(0, 12))
+
+    label_identificador = "Número do Lote" if tipo == "sopradora" else "OS"
+    ttk.Label(frm_dados, text=label_identificador).grid(row=0, column=0, sticky="w", padx=6, pady=6)
+    entry_identificador = ttk.Entry(frm_dados, width=28)
+    entry_identificador.grid(row=0, column=1, sticky="w", padx=6, pady=6)
+
+    ttk.Label(frm_dados, text="Código do Produto").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+    entry_codigo = ttk.Entry(frm_dados, width=28)
+    entry_codigo.grid(row=1, column=1, sticky="w", padx=6, pady=6)
+
+    ttk.Label(frm_dados, text="Descrição").grid(row=2, column=0, sticky="nw", padx=6, pady=6)
+    text_desc = tk.Text(frm_dados, width=50, height=5)
+    text_desc.grid(row=2, column=1, sticky="w", padx=6, pady=6)
+
+    ttk.Label(frm_dados, text="Volume total").grid(row=3, column=0, sticky="w", padx=6, pady=6)
+    entry_volume_total = ttk.Entry(frm_dados, width=12)
+    entry_volume_total.grid(row=3, column=1, sticky="w", padx=6, pady=6)
+
+    ttk.Label(frm_dados, text="Volume inicial").grid(row=4, column=0, sticky="w", padx=6, pady=6)
+    entry_volume_inicial = ttk.Entry(frm_dados, width=12)
+    entry_volume_inicial.grid(row=4, column=1, sticky="w", padx=6, pady=6)
+
+    ttk.Label(frm_dados, text="Pacote (UN)").grid(row=5, column=0, sticky="w", padx=6, pady=6)
+    entry_qtd_pacote = ttk.Entry(frm_dados, width=12)
+    entry_qtd_pacote.grid(row=5, column=1, sticky="w", padx=6, pady=6)
+
+    ttk.Label(frm_dados, text="Quantidade de etiquetas").grid(row=6, column=0, sticky="w", padx=6, pady=6)
+    entry_quantidade = ttk.Entry(frm_dados, width=12)
+    entry_quantidade.grid(row=6, column=1, sticky="w", padx=6, pady=6)
+
+    widgets_para_bind = [
+        entry_identificador,
+        entry_codigo,
+        entry_volume_total,
+        entry_volume_inicial,
+        entry_qtd_pacote,
+        entry_quantidade
+    ]
+
+    for widget in widgets_para_bind:
+        widget.bind("<KeyRelease>", lambda e: desenhar_previa())
+
+    text_desc.bind("<KeyRelease>", lambda e: desenhar_previa())
+
     return {
-        "lote": entry_lote.get(),
-        "codigo_produto": entry_codigo.get(),
-        "descricao": text_desc.get("1.0", tk.END).strip(),
-        "total_volumes": entry_volume_total.get(),
-        "quantidade": entry_quantidade.get()
+        "identificador": entry_identificador,
+        "codigo": entry_codigo,
+        "descricao": text_desc,
+        "volume_total": entry_volume_total,
+        "volume_inicial": entry_volume_inicial,
+        "qtd_pacote": entry_qtd_pacote,
+        "quantidade": entry_quantidade,
+    }
+
+def coletar_dados():
+    form = get_formulario_atual()
+    return {
+        "tipo_etiqueta": get_tipo_etiqueta_atual(),
+        "identificador": get_widget_value(form.get("identificador")),
+        "codigo_produto": get_widget_value(form.get("codigo")),
+        "descricao": get_widget_value(form.get("descricao")),
+        "total_volumes": get_widget_value(form.get("volume_total")),
+        "volume_inicial": get_widget_value(form.get("volume_inicial")),
+        "qtd_pacote": get_widget_value(form.get("qtd_pacote")),
+        "quantidade": get_widget_value(form.get("quantidade")),
+        "ordem_invertida": bool(ordem_invertida_var.get()) if ordem_invertida_var else False,
     }
 
 def validar_dados(dados):
-    if not dados["lote"]:
-        return "Preencha o lote."
+    label_id = "Número do Lote" if dados.get("tipo_etiqueta") == "sopradora" else "OS"
+
+    if not dados["identificador"]:
+        return f"Preencha o campo {label_id}."
     if not dados["codigo_produto"]:
         return "Preencha o código do produto."
     if not dados["descricao"]:
         return "Preencha a descrição."
     if not dados["total_volumes"]:
         return "Preencha o volume total."
+    if not dados["volume_inicial"]:
+        return "Preencha o volume inicial."
+    if not dados["qtd_pacote"]:
+        return "Preencha o Pacote (UN)."
     if not dados["quantidade"]:
         return "Preencha a quantidade de etiquetas."
 
@@ -297,16 +521,64 @@ def validar_dados(dados):
         return "Volume total inválido."
 
     try:
+        volume_inicial = int(dados["volume_inicial"])
+        if volume_inicial <= 0:
+            return "Volume inicial deve ser maior que zero."
+    except Exception:
+        return "Volume inicial inválido."
+
+    if volume_inicial > total:
+        return "Volume inicial não pode ser maior que o volume total."
+
+    try:
+        qtd_pacote = int(dados["qtd_pacote"])
+        if qtd_pacote <= 0:
+            return "Pacote (UN) deve ser maior que zero."
+    except Exception:
+        return "Pacote (UN) inválido."
+
+    try:
         qtd = int(dados["quantidade"])
         if qtd <= 0:
             return "Quantidade deve ser maior que zero."
     except Exception:
         return "Quantidade inválida."
 
-    if qtd > total:
-        return "A quantidade de etiquetas não pode ser maior que o volume total."
+    volume_final = volume_inicial + qtd - 1
+    if volume_final > total:
+        return f"O intervalo solicitado termina em {volume_final}, mas o volume total é {total}."
 
     return None
+
+def preencher_formulario_padrao(form, tipo):
+    form["identificador"].delete(0, tk.END)
+    form["codigo"].delete(0, tk.END)
+    form["descricao"].delete("1.0", tk.END)
+    form["volume_total"].delete(0, tk.END)
+    form["volume_inicial"].delete(0, tk.END)
+    form["qtd_pacote"].delete(0, tk.END)
+    form["quantidade"].delete(0, tk.END)
+
+    if tipo == "sopradora":
+        form["identificador"].insert(0, "OS26008254")
+    else:
+        form["identificador"].insert(0, "OS25-004855")
+
+    form["codigo"].insert(0, "132483")
+    form["descricao"].insert("1.0", "Tbe IPP 200L AZ 10,3 KG RE BJBR SL Tolerancia MIN10,0 KG - ECZLJ")
+    form["volume_total"].insert(0, "250")
+    form["volume_inicial"].insert(0, "1")
+    form["qtd_pacote"].insert(0, "1")
+    form["quantidade"].insert(0, "50")
+
+def limpar_campos():
+    for tipo, form in FORMULARIOS.items():
+        preencher_formulario_padrao(form, tipo)
+
+    if ordem_invertida_var is not None:
+        ordem_invertida_var.set(False)
+
+    desenhar_previa()
 
 # ==========================================================
 # PREVIEW
@@ -315,6 +587,9 @@ PREVIEW_SCALE = 0.5
 
 def dots_to_canvas(v):
     return int(v * PREVIEW_SCALE)
+
+def preview_font_px(dots_value):
+    return max(7, dots_to_canvas(int(dots_value)))
 
 def desenhar_previa():
     canvas_preview.delete("all")
@@ -328,49 +603,121 @@ def desenhar_previa():
     y1 = y0 + altura
 
     canvas_preview.create_rectangle(x0, y0, x1, y1, fill="white", outline="#222", width=2)
-    canvas_preview.create_text((x0 + x1)//2, 8, text="Prévia da Etiqueta 100x40", font=("Segoe UI", 10, "bold"))
+
+    tipo_atual = get_tipo_etiqueta_atual().capitalize()
+    canvas_preview.create_text(
+        (x0 + x1)//2,
+        8,
+        text=f"Prévia da Etiqueta 100x40 - {tipo_atual}",
+        font=("Segoe UI", -12, "bold")
+    )
 
     dados = coletar_dados()
     codigo = dados["codigo_produto"].strip() or "132483"
     descricao = dados["descricao"].strip() or "Descrição do produto"
-    lote = ensure_os_prefix(dados["lote"].strip() or "25-000000")
+    identificador = ensure_os_prefix(dados["identificador"].strip() or "OS25-000000")
 
     try:
         total = int(dados["total_volumes"])
     except Exception:
-        total = 10
+        total = 250
 
-    texto_topo = f"{codigo} / {descricao}"
-    linhas_desc = quebrar_texto(texto_topo, tamanho_max_linha=32, max_linhas=2)
+    try:
+        volume_inicial = int(dados.get("volume_inicial", "1"))
+        if volume_inicial <= 0:
+            volume_inicial = 1
+    except Exception:
+        volume_inicial = 1
+
+    try:
+        qtd = int(dados.get("quantidade", "1"))
+        if qtd <= 0:
+            qtd = 1
+    except Exception:
+        qtd = 1
+
+    try:
+        qtd_pacote = int(dados.get("qtd_pacote", "1"))
+        if qtd_pacote <= 0:
+            qtd_pacote = 1
+    except Exception:
+        qtd_pacote = 1
+
+    qtd_pacote_fmt = f"{qtd_pacote:04d}"
+
+    ordem_invertida = bool(dados.get("ordem_invertida", False))
+    volume_preview = volume_inicial + qtd - 1 if ordem_invertida else volume_inicial
+    if volume_preview > total:
+        volume_preview = total
+
+    desc_layout = fit_description_layout(f"{codigo} / {descricao}", CONFIG_LAYOUT)
 
     desc_x = x0 + dots_to_canvas(int(CONFIG_LAYOUT["descricao_x"]))
     desc_y = y0 + dots_to_canvas(int(CONFIG_LAYOUT["descricao_y"]))
-    desc_font = max(8, int(CONFIG_LAYOUT["descricao_font"] * 0.42))
 
     lote_x = x0 + dots_to_canvas(int(CONFIG_LAYOUT["lote_x"]))
     lote_y = y0 + dots_to_canvas(int(CONFIG_LAYOUT["lote_y"]))
-    lote_font = max(8, int(CONFIG_LAYOUT["lote_font"] * 0.42))
+    lote_font_px = preview_font_px(CONFIG_LAYOUT["lote_font"])
 
     vol_x = x0 + dots_to_canvas(int(CONFIG_LAYOUT["volume_x"]))
     vol_y = y0 + dots_to_canvas(int(CONFIG_LAYOUT["volume_y"]))
-    vol_font = max(8, int(CONFIG_LAYOUT["volume_font"] * 0.42))
+    vol_font_px = preview_font_px(CONFIG_LAYOUT["volume_font"])
 
     qr_x = x0 + dots_to_canvas(int(CONFIG_LAYOUT["qr_x"]))
     qr_y = y0 + dots_to_canvas(int(CONFIG_LAYOUT["qr_y"]))
-    qr_size = max(42, int(CONFIG_LAYOUT["qr_magnification"]) * 16)
 
-    linha2_offset = dots_to_canvas(int(CONFIG_LAYOUT["linha2_offset_y"]))
+    qr_size = max(42, dots_to_canvas((int(CONFIG_LAYOUT["qr_magnification"]) * 22) + 34))
 
-    if len(linhas_desc) > 0:
-        canvas_preview.create_text(desc_x, desc_y, anchor="nw", text=linhas_desc[0], font=("Segoe UI", desc_font, "bold"))
-    if len(linhas_desc) > 1:
-        canvas_preview.create_text(desc_x, desc_y + linha2_offset, anchor="nw", text=linhas_desc[1], font=("Segoe UI", desc_font, "bold"))
+    desc_font_px = preview_font_px(desc_layout["font"])
+    line_height_preview = max(desc_font_px + 1, dots_to_canvas(desc_layout["line_height"]))
 
-    canvas_preview.create_text(lote_x, lote_y, anchor="nw", text=f"Lote: {lote}", font=("Segoe UI", lote_font))
-    canvas_preview.create_text(vol_x, vol_y, anchor="nw", text=f"Volume 1/{total}", font=("Segoe UI", vol_font, "bold"))
+    for idx, linha in enumerate(desc_layout["lines"]):
+        y = desc_y + (idx * line_height_preview)
+        canvas_preview.create_text(
+          desc_x,
+          y,
+          anchor="nw",
+          text=linha,
+          font=("Segoe UI", -desc_font_px, "bold")
+        )
+
+    if dados.get("tipo_etiqueta") == "sopradora":
+        txt_identificador = f"Número do Lote: {identificador}"
+    else:
+        txt_identificador = f"{identificador}"
+
+    canvas_preview.create_text(
+        lote_x,
+        lote_y,
+        anchor="nw",
+        text=txt_identificador,
+        font=("Segoe UI", -lote_font_px)
+    )
+
+    pacote_y = lote_y + max(18, dots_to_canvas(int(CONFIG_LAYOUT["lote_font"]) + 8))
+    canvas_preview.create_text(
+        lote_x,
+        pacote_y,
+        anchor="nw",
+        text=f"PACOTE COM {qtd_pacote_fmt} UN",
+        font=("Segoe UI", -lote_font_px, "bold")
+    )
+
+    canvas_preview.create_text(
+        vol_x,
+        vol_y,
+        anchor="nw",
+        text=f"VOLUME {volume_preview}/{total}",
+        font=("Segoe UI", -vol_font_px, "bold")
+    )
 
     canvas_preview.create_rectangle(qr_x, qr_y, qr_x + qr_size, qr_y + qr_size, outline="#222", width=2)
-    canvas_preview.create_text(qr_x + qr_size // 2, qr_y + qr_size // 2, text="QR", font=("Segoe UI", 10, "bold"))
+    canvas_preview.create_text(
+        qr_x + qr_size // 2,
+        qr_y + qr_size // 2,
+        text="QR",
+        font=("Segoe UI", -12, "bold")
+    )
 
 # ==========================================================
 # LAYOUT / SLIDERS
@@ -532,21 +879,6 @@ def imprimir(apenas_uma=False):
     except Exception as e:
         messagebox.showerror("Erro", str(e))
 
-def limpar_campos():
-    entry_lote.delete(0, tk.END)
-    entry_codigo.delete(0, tk.END)
-    text_desc.delete("1.0", tk.END)
-    entry_volume_total.delete(0, tk.END)
-    entry_quantidade.delete(0, tk.END)
-
-    entry_lote.insert(0, "25-004855")
-    entry_codigo.insert(0, "132483")
-    text_desc.insert("1.0", "Tbe IPP 200L AZ 10,3 KG RE BJBR SL Tolerancia MIN10,0 KG - ECZLJ")
-    entry_volume_total.insert(0, "10")
-    entry_quantidade.insert(0, "2")
-
-    desenhar_previa()
-
 # ==========================================================
 # SCROLLABLE FRAME
 # ==========================================================
@@ -583,8 +915,8 @@ class ScrollableFrame(ttk.Frame):
 # ==========================================================
 root = tk.Tk()
 root.title("Gerador de Etiquetas Zebra 100x40")
-root.geometry("980x690")
-root.minsize(920, 650)
+root.geometry("980x720")
+root.minsize(920, 680)
 
 style = ttk.Style()
 try:
@@ -610,28 +942,22 @@ notebook.add(aba_ajuste, text="Ajuste da Etiqueta")
 container1 = ttk.Frame(aba_impressao, padding=12)
 container1.pack(fill="both", expand=True)
 
-frm_dados = ttk.LabelFrame(container1, text="Dados da Etiqueta", padding=10)
-frm_dados.pack(fill="x", pady=(0, 12))
+frm_modelos = ttk.LabelFrame(container1, text="Tipo de Etiqueta", padding=8)
+frm_modelos.pack(fill="x", pady=(0, 12))
 
-ttk.Label(frm_dados, text="Número do Lote (OS)").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-entry_lote = ttk.Entry(frm_dados, width=28)
-entry_lote.grid(row=0, column=1, sticky="w", padx=6, pady=6)
+notebook_modelos = ttk.Notebook(frm_modelos)
+notebook_modelos.pack(fill="x", expand=True)
 
-ttk.Label(frm_dados, text="Código do Produto").grid(row=1, column=0, sticky="w", padx=6, pady=6)
-entry_codigo = ttk.Entry(frm_dados, width=28)
-entry_codigo.grid(row=1, column=1, sticky="w", padx=6, pady=6)
+aba_injetora = ttk.Frame(notebook_modelos)
+aba_sopradora = ttk.Frame(notebook_modelos)
 
-ttk.Label(frm_dados, text="Descrição").grid(row=2, column=0, sticky="nw", padx=6, pady=6)
-text_desc = tk.Text(frm_dados, width=50, height=5)
-text_desc.grid(row=2, column=1, sticky="w", padx=6, pady=6)
+notebook_modelos.add(aba_injetora, text="Injetora")
+notebook_modelos.add(aba_sopradora, text="Sopradora")
 
-ttk.Label(frm_dados, text="Volume total").grid(row=3, column=0, sticky="w", padx=6, pady=6)
-entry_volume_total = ttk.Entry(frm_dados, width=12)
-entry_volume_total.grid(row=3, column=1, sticky="w", padx=6, pady=6)
+FORMULARIOS["injetora"] = criar_formulario_tipo(aba_injetora, "injetora")
+FORMULARIOS["sopradora"] = criar_formulario_tipo(aba_sopradora, "sopradora")
 
-ttk.Label(frm_dados, text="Quantidade de etiquetas").grid(row=4, column=0, sticky="w", padx=6, pady=6)
-entry_quantidade = ttk.Entry(frm_dados, width=12)
-entry_quantidade.grid(row=4, column=1, sticky="w", padx=6, pady=6)
+notebook_modelos.bind("<<NotebookTabChanged>>", lambda e: desenhar_previa())
 
 frm_imp = ttk.LabelFrame(container1, text="Impressora", padding=10)
 frm_imp.pack(fill="x", pady=(0, 12))
@@ -646,6 +972,17 @@ linha_btn_imp.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=6)
 ttk.Button(linha_btn_imp, text="Selecionar...", command=selecionar_impressora).pack(side="left", padx=(0, 6))
 ttk.Button(linha_btn_imp, text="Usar padrão do Windows", command=usar_padrao_windows).pack(side="left", padx=(0, 6))
 ttk.Button(linha_btn_imp, text="Salvar como padrão", command=salvar_impressora_padrao).pack(side="left")
+
+frm_opcoes = ttk.LabelFrame(container1, text="Opções de Impressão", padding=10)
+frm_opcoes.pack(fill="x", pady=(0, 12))
+
+ordem_invertida_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(
+    frm_opcoes,
+    text="Imprimir em ordem invertida (último → primeiro)",
+    variable=ordem_invertida_var,
+    command=desenhar_previa
+).pack(anchor="w")
 
 frm_acoes = ttk.Frame(container1)
 frm_acoes.pack(fill="x", pady=(4, 0))

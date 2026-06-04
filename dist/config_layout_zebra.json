@@ -1,0 +1,16 @@
+{
+    "descricao_x": 20,
+    "descricao_y": 18,
+    "descricao_font": 22,
+    "lote_x": 20,
+    "lote_y": 92,
+    "lote_font": 18,
+    "volume_x": 20,
+    "volume_y": 126,
+    "volume_font": 24,
+    "qr_x": 610,
+    "qr_y": 28,
+    "qr_magnification": 4,
+    "linha2_offset_y": 24,
+    "orientacao": "N"
+}
