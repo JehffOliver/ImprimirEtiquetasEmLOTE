@@ -2,10 +2,10 @@
 # Gerador de Etiquetas Zebra 100x40 - Interface com Abas
 #
 # Requisitos:
-#   pip install pywin32
+#   pip install pywin32 reportlab
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import json
 import os
 import random
@@ -16,6 +16,21 @@ try:
     import win32print
 except ImportError:
     win32print = None
+
+try:
+    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.lib.units import mm as rl_mm
+    from reportlab.graphics.barcode.qr import QrCodeWidget
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderPDF
+    HAS_REPORTLAB = True
+except ImportError:
+    pdf_canvas = None
+    rl_mm = None
+    QrCodeWidget = None
+    Drawing = None
+    renderPDF = None
+    HAS_REPORTLAB = False
 
 CONFIG_IMPRESSORA_ARQ = "config_impressora.json"
 CONFIG_LAYOUT_ARQ = "config_layout_zebra.json"
@@ -215,6 +230,173 @@ def fit_description_layout(texto, cfg):
         "lines": lines,
     }
 
+
+def dots_to_points(v):
+    return float(v) * 72.0 / DPI
+
+def qr_payload_compacto(codigo, identificador, qtd_pacote_int, volume_atual, volume_total):
+    codigo_limpo = zpl_escape(codigo)
+    identificador_limpo = zpl_escape(ensure_os_prefix(identificador))
+    return f"{codigo_limpo}|{identificador_limpo}|{int(qtd_pacote_int)}|{int(volume_atual)}|{int(volume_total)}"
+
+def gerar_sequencia_volumes(total_volumes, volume_inicial, quantidade, ordem_invertida=False):
+    total_volumes = int(total_volumes)
+    volume_inicial = int(volume_inicial)
+    quantidade = int(quantidade)
+
+    if total_volumes <= 0:
+        raise ValueError("Volume total deve ser maior que zero.")
+
+    if volume_inicial <= 0:
+        raise ValueError("Volume inicial deve ser maior que zero.")
+
+    if volume_inicial > total_volumes:
+        raise ValueError("Volume inicial não pode ser maior que o volume total.")
+
+    if quantidade <= 0:
+        raise ValueError("Quantidade deve ser maior que zero.")
+
+    volume_final = volume_inicial + quantidade - 1
+    if volume_final > total_volumes:
+        raise ValueError(
+            f"O intervalo solicitado ultrapassa o volume total. "
+            f"Último volume seria {volume_final}, mas o total é {total_volumes}."
+        )
+
+    if ordem_invertida:
+        return list(range(volume_final, volume_inicial - 1, -1))
+    return list(range(volume_inicial, volume_final + 1))
+
+def nome_pdf_padrao(dados, apenas_uma=False):
+    tipo = dados.get("tipo_etiqueta", "etiqueta")
+    codigo = (dados.get("codigo_produto") or "item").strip() or "item"
+    identificador = (dados.get("identificador") or "").strip().replace("/", "-").replace("\\", "-")
+    datahora = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sufixo = "1etiqueta" if apenas_uma else f"{dados.get('quantidade', 'lote')}etiquetas"
+    partes = [tipo, codigo]
+    if identificador:
+        partes.append(identificador)
+    partes.append(sufixo)
+    partes.append(datahora)
+    return "_".join(partes) + ".pdf"
+
+def desenhar_qr_no_pdf(c, payload, x_dots, y_dots, size_dots):
+    if not HAS_REPORTLAB:
+        return
+
+    qr_widget = QrCodeWidget(payload)
+    bounds = qr_widget.getBounds()
+    x1, y1, x2, y2 = bounds
+    w = max(1, x2 - x1)
+    h = max(1, y2 - y1)
+
+    size_pt = dots_to_points(size_dots)
+    drawing = Drawing(size_pt, size_pt, transform=[size_pt / w, 0, 0, size_pt / h, 0, 0])
+    drawing.add(qr_widget)
+
+    page_h = dots_to_points(LABEL_HEIGHT)
+    x_pt = dots_to_points(x_dots)
+    y_pt = page_h - dots_to_points(y_dots) - size_pt
+
+    renderPDF.draw(drawing, c, x_pt, y_pt)
+
+def gerar_pdf_lote(dados, quantidade, pdf_path):
+    if not HAS_REPORTLAB:
+        raise RuntimeError("Para gerar PDF, instale o pacote reportlab: pip install reportlab")
+
+    identificador = dados["identificador"].strip()
+    codigo = dados["codigo_produto"].strip()
+    descricao = dados["descricao"].strip()
+    tipo_etiqueta = dados.get("tipo_etiqueta", "injetora").strip().lower()
+    qtd_pacote = dados.get("qtd_pacote", "1")
+    ordem_invertida = bool(dados.get("ordem_invertida", False))
+
+    total_volumes = int(dados["total_volumes"])
+    volume_inicial = int(dados["volume_inicial"])
+    volumes = gerar_sequencia_volumes(total_volumes, volume_inicial, quantidade, ordem_invertida)
+
+    try:
+        qtd_pacote_int = int(str(qtd_pacote).strip())
+        if qtd_pacote_int <= 0:
+            qtd_pacote_int = 1
+    except Exception:
+        qtd_pacote_int = 1
+
+    qtd_pacote_fmt = f"{qtd_pacote_int:04d}"
+    page_size = (LARGURA_MM * rl_mm, ALTURA_MM * rl_mm)
+    c = pdf_canvas.Canvas(pdf_path, pagesize=page_size)
+    page_w, page_h = page_size
+
+    for volume_atual in volumes:
+        descricao_layout = fit_description_layout(
+            f"{codigo} / {normalizar_espacos(descricao)}" if descricao else codigo,
+            CONFIG_LAYOUT
+        )
+
+        identificador_limpo = ensure_os_prefix(identificador)
+
+        if tipo_etiqueta == "sopradora":
+            txt_identificador = f"Número do Lote: {identificador_limpo}"
+        else:
+            txt_identificador = f"{identificador_limpo}"
+
+        txt_pacote = f"PACOTE COM {qtd_pacote_fmt} UN"
+        txt_vol = f"VOLUME {volume_atual}/{total_volumes}"
+
+        desc_x = int(CONFIG_LAYOUT["descricao_x"])
+        desc_y = int(CONFIG_LAYOUT["descricao_y"])
+
+        lote_x = int(CONFIG_LAYOUT["lote_x"])
+        lote_y = int(CONFIG_LAYOUT["lote_y"])
+        lote_font = int(CONFIG_LAYOUT["lote_font"])
+
+        vol_x = int(CONFIG_LAYOUT["volume_x"])
+        vol_y = int(CONFIG_LAYOUT["volume_y"])
+        vol_font = int(CONFIG_LAYOUT["volume_font"])
+
+        qr_x = int(CONFIG_LAYOUT["qr_x"])
+        qr_y = int(CONFIG_LAYOUT["qr_y"])
+        qr_m = int(CONFIG_LAYOUT["qr_magnification"])
+
+        qr_size_dots = max(84, (int(qr_m) * 22) + 34)
+
+        # Borda leve para enxergar a etiqueta em casa
+        c.setLineWidth(0.4)
+        c.rect(0.6 * rl_mm, 0.6 * rl_mm, page_w - (1.2 * rl_mm), page_h - (1.2 * rl_mm))
+
+        for idx_linha, linha in enumerate(descricao_layout["lines"]):
+            font_pt = dots_to_points(descricao_layout["font"])
+            y_top_dots = desc_y + (idx_linha * descricao_layout["line_height"])
+            x_pt = dots_to_points(desc_x)
+            y_pt = page_h - dots_to_points(y_top_dots) - font_pt
+            c.setFont("Helvetica-Bold", font_pt)
+            c.drawString(x_pt, y_pt, linha)
+
+        lote_font_pt = dots_to_points(lote_font)
+        lote_x_pt = dots_to_points(lote_x)
+        lote_y_pt = page_h - dots_to_points(lote_y) - lote_font_pt
+        c.setFont("Helvetica", lote_font_pt)
+        c.drawString(lote_x_pt, lote_y_pt, txt_identificador)
+
+        pacote_font_pt = dots_to_points(lote_font)
+        pacote_y_dots = lote_y + max(34, lote_font + 10)
+        pacote_y_pt = page_h - dots_to_points(pacote_y_dots) - pacote_font_pt
+        c.setFont("Helvetica-Bold", pacote_font_pt)
+        c.drawString(lote_x_pt, pacote_y_pt, txt_pacote)
+
+        vol_font_pt = dots_to_points(vol_font)
+        vol_x_pt = dots_to_points(vol_x)
+        vol_y_pt = page_h - dots_to_points(vol_y) - vol_font_pt
+        c.setFont("Helvetica-Bold", vol_font_pt)
+        c.drawString(vol_x_pt, vol_y_pt, txt_vol)
+
+        payload = qr_payload_compacto(codigo, identificador_limpo, qtd_pacote_int, volume_atual, total_volumes)
+        desenhar_qr_no_pdf(c, payload, qr_x, qr_y, qr_size_dots)
+
+        c.showPage()
+
+    c.save()
+
 # ==========================================================
 # IMPRESSORAS
 # ==========================================================
@@ -283,7 +465,6 @@ def gerar_zpl_uma_etiqueta(
     identificador_limpo = zpl_escape(ensure_os_prefix(identificador))
     volume_atual = zpl_escape(str(volume_atual))
     volume_total = zpl_escape(str(volume_total))
-    chave = gerar_chave_unica()
 
     try:
         qtd_pacote_int = int(str(qtd_pacote).strip())
@@ -294,7 +475,7 @@ def gerar_zpl_uma_etiqueta(
 
     qtd_pacote_fmt = f"{qtd_pacote_int:04d}"
 
-    qr_payload = f"{codigo}|{identificador_limpo}|{qtd_pacote_int}|{zpl_escape(normalizar_espacos(descricao))}|{volume_atual}|{volume_total}|{chave}"
+    qr_payload = qr_payload_compacto(codigo, identificador_limpo, qtd_pacote_int, volume_atual, volume_total)
 
     if tipo_etiqueta == "sopradora":
         txt_identificador = f"Número do Lote: {identificador_limpo}"
@@ -358,33 +539,10 @@ def gerar_zpl_lote(dados, quantidade):
 
     total_volumes = int(dados["total_volumes"])
     volume_inicial = int(dados["volume_inicial"])
-
-    if total_volumes <= 0:
-        raise ValueError("Volume total deve ser maior que zero.")
-
-    if volume_inicial <= 0:
-        raise ValueError("Volume inicial deve ser maior que zero.")
-
-    if volume_inicial > total_volumes:
-        raise ValueError("Volume inicial não pode ser maior que o volume total.")
-
-    if quantidade <= 0:
-        raise ValueError("Quantidade deve ser maior que zero.")
-
-    volume_final = volume_inicial + quantidade - 1
-    if volume_final > total_volumes:
-        raise ValueError(
-            f"O intervalo solicitado ultrapassa o volume total. "
-            f"Último volume seria {volume_final}, mas o total é {total_volumes}."
-        )
-
-    if ordem_invertida:
-        sequencia = range(volume_final, volume_inicial - 1, -1)
-    else:
-        sequencia = range(volume_inicial, volume_final + 1)
+    volumes = gerar_sequencia_volumes(total_volumes, volume_inicial, quantidade, ordem_invertida)
 
     etiquetas = []
-    for volume_atual in sequencia:
+    for volume_atual in volumes:
         etiquetas.append(
             gerar_zpl_uma_etiqueta(
                 codigo=codigo,
@@ -879,6 +1037,31 @@ def imprimir(apenas_uma=False):
     except Exception as e:
         messagebox.showerror("Erro", str(e))
 
+def gerar_pdf(apenas_uma=False):
+    try:
+        dados = coletar_dados()
+        erro = validar_dados(dados)
+        if erro:
+            messagebox.showwarning("Atenção", erro)
+            return
+
+        quantidade = 1 if apenas_uma else int(dados["quantidade"])
+        nome_padrao = nome_pdf_padrao(dados, apenas_uma=apenas_uma)
+
+        pdf_path = filedialog.asksaveasfilename(
+            title="Salvar PDF das etiquetas",
+            defaultextension=".pdf",
+            initialfile=nome_padrao,
+            filetypes=[("Arquivo PDF", "*.pdf")]
+        )
+        if not pdf_path:
+            return
+
+        gerar_pdf_lote(dados, quantidade, pdf_path)
+        messagebox.showinfo("Sucesso", f"PDF gerado com sucesso:\n{pdf_path}")
+    except Exception as e:
+        messagebox.showerror("Erro", str(e))
+
 # ==========================================================
 # SCROLLABLE FRAME
 # ==========================================================
@@ -989,6 +1172,8 @@ frm_acoes.pack(fill="x", pady=(4, 0))
 
 ttk.Button(frm_acoes, text="Imprimir", command=lambda: imprimir(False)).pack(side="left", padx=(0, 8))
 ttk.Button(frm_acoes, text="Testar 1 Etiqueta", command=lambda: imprimir(True)).pack(side="left", padx=(0, 8))
+ttk.Button(frm_acoes, text="Gerar PDF", command=lambda: gerar_pdf(False)).pack(side="left", padx=(0, 8))
+ttk.Button(frm_acoes, text="PDF 1 Etiqueta", command=lambda: gerar_pdf(True)).pack(side="left", padx=(0, 8))
 ttk.Button(frm_acoes, text="Limpar", command=limpar_campos).pack(side="left")
 
 # ==========================================================
